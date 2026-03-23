@@ -694,6 +694,340 @@ MuseScore {
             uiRef.selectedIndex = Math.min(keep, Math.max(0, model.count - 1))
     }
 
+    // --- Orchestrate: helpers + engine (selection -> target staves) ---
+
+    // Clamp integer with bounds
+    function clampInt(v, lo, hi) {
+        var n = parseInt(v, 10)
+        if (isNaN(n)) return lo
+        return Math.max(lo, Math.min(hi, n))
+    }
+
+    // Ensure a writable slot at the cursor's current fraction by creating a rest, then restore position.
+    // (Same write-safety pattern used in Keyswitch Creator)  // see ensureWritableSlot() usage there
+    function ensureWritableSlot(c, num, den) {
+        var t = c.fraction
+        c.setDuration(num, den)
+        try { c.addRest() } catch (e) {}
+        c.rewindToFraction(t)
+    } // [1](https://stlukes-my.sharepoint.com/personal/ewarren_slhs_org/Documents/Microsoft%20Copilot%20Chat%20Files/keyswitch_creator.txt)
+
+    // Extract ascending pitches from a CHORD element (returns array of ints, low -> high)
+    function chordPitchesAsc(ch) {
+        var arr = []
+        try {
+            if (ch && ch.type === Element.CHORD && ch.notes) {
+                for (var i in ch.notes) {
+                    var n = ch.notes[i]
+                    if (n && n.pitch !== undefined)
+                        arr.push(parseInt(n.pitch, 10))
+                }
+            }
+        } catch (e) {}
+        arr.sort(function(a, b){ return a - b })
+        return arr
+    }
+
+    // Returns the source pitch for the given row index in the 8-row UI.
+    // Row labels (top..bottom):
+    // 0: Top, 1: Seventh, 2: Sixth, 3: Fifth, 4: Fourth, 5: Third, 6: Second, 7: Bottom
+    // Mapping rules:
+    // - Top (0)    -> topmost note (index n-1)
+    // - Bottom (7) -> bottommost note (index 0)
+    // - Others     -> kth-from-bottom (k = 7 - rowIndex), clamped to existing range
+    function pitchForRowFromChord(ch, rowIndex) {
+      var asc = chordPitchesAsc(ch)
+      if (!asc.length) return null
+      var n = asc.length
+      var idx
+
+      if (rowIndex === 0) {
+        // Top
+        idx = n - 1
+      } else if (rowIndex === 7) {
+        // Bottom
+        idx = 0
+      } else {
+        // 1..6 map to 2nd..7th from bottom; clamp to top if chord is smaller
+        var fromBottom = 7 - rowIndex   // row 6 -> 1 (Second), row 1 -> 6 (Seventh)
+        idx = Math.min(fromBottom, n - 1)
+      }
+
+      return asc[idx]
+    }
+
+    // Collect normal-note CHORDs on a specific source staff inside current selection window
+    function collectSourceChordsInSelectionForStaff(srcStaffIdx) {
+        var chords = []
+        if (!curScore || !curScore.selection) return chords
+
+        if (curScore.selection.isRange) {
+            var startTick = curScore.selection.startSegment.tick
+            var endTick = curScore.selection.endSegment ? curScore.selection.endSegment.tick : (curScore.lastSegment ? curScore.lastSegment.tick + 1 : startTick)
+            var c = curScore.newCursor()
+            c.track = srcStaffIdx * 4
+            c.rewindToTick(startTick)
+            while (c.segment && c.tick < endTick) {
+                var el = c.element
+                if (el && el.type === Element.CHORD && el.noteType === NoteType.NORMAL)
+                    chords.push(el)
+                if (!c.next()) break
+            }
+        } else {
+            // list selection: filter to the same staff as the first chord/note
+            for (var i = 0; i < curScore.selection.elements.length; ++i) {
+                var el = curScore.selection.elements[i]
+                var ch = null
+                if (el && el.type === Element.NOTE && el.parent && el.parent.type === Element.CHORD) ch = el.parent
+                else if (el && el.type === Element.CHORD) ch = el
+                if (!ch) continue
+                if (ch.noteType !== NoteType.NORMAL) continue
+                if (ch.staffIdx === srcStaffIdx) chords.push(ch)
+            }
+            // sort by time, then by track (voice) to keep deterministic order
+            chords.sort(function(a, b) {
+                if (a.fraction.lessThan(b.fraction)) return -1
+                if (a.fraction.greaterThan(b.fraction)) return 1
+                return a.track - b.track
+            })
+        }
+        return chords
+    } // [1](https://stlukes-my.sharepoint.com/personal/ewarren_slhs_org/Documents/Microsoft%20Copilot%20Chat%20Files/keyswitch_creator.txt)
+
+    // Quick check: do we have a selected preset with any active rows in any staff?
+    function canApplyToSelection() {
+        var uiRef = orchestratorWin ? orchestratorWin.rootUIRef : null
+        if (!uiRef || uiRef.selectedIndex < 0 || uiRef.selectedIndex >= presets.length) return false
+        var p = presets[uiRef.selectedIndex]
+        if (!p || !p.noteRowsByStaff) return false
+        for (var sid in p.noteRowsByStaff) {
+            if (!p.noteRowsByStaff.hasOwnProperty(sid)) continue
+            var rows = p.noteRowsByStaff[sid] || []
+            for (var i = 0; i < rows.length && i < 8; ++i)
+                if (rows[i] && rows[i].active) return true
+        }
+        return false
+    }
+
+    // Main entry: apply the current preset to the current selection
+    function applyCurrentPresetToSelection() {
+        if (!curScore || !curScore.selection) return
+        var uiRef = orchestratorWin ? orchestratorWin.rootUIRef : null
+        if (!uiRef || uiRef.selectedIndex < 0 || uiRef.selectedIndex >= presets.length) return
+        var p = presets[uiRef.selectedIndex]
+        if (!p || !p.noteRowsByStaff) return
+
+        // Determine source (sketch) staff from the selection
+        var srcStaff = -1
+        if (curScore.selection.isRange) {
+            srcStaff = curScore.selection.startStaff
+        } else if (curScore.selection.elements && curScore.selection.elements.length) {
+            // take staff of first chord/note in the selection list
+            for (var ii = 0; ii < curScore.selection.elements.length; ++ii) {
+                var el = curScore.selection.elements[ii]
+                if (el && el.staffIdx !== undefined) { srcStaff = el.staffIdx; break }
+                if (el && el.parent && el.parent.staffIdx !== undefined) { srcStaff = el.parent.staffIdx; break }
+            }
+        }
+        if (!(srcStaff >= 0)) {
+            console.log("[Orchestrator] No sketch staff detected from selection; aborting.")
+            return
+        }
+
+        // Gather the source chords on that staff within the selection
+        var srcChords = collectSourceChordsInSelectionForStaff(srcStaff)
+        if (!srcChords.length) return
+
+        // Begin a single undoable command
+        curScore.startCmd(qsTr("Orchestrator apply: %1").arg(String(p.name ?? qsTr("Preset"))))
+        try {
+            // For every source chord, copy rows to every target staff that has them active
+            for (var ci = 0; ci < srcChords.length; ++ci) {
+                var chord = srcChords[ci]
+                var frac = chord.fraction
+                var dur = chord.actualDuration
+                var num = (dur && dur.numerator) ? dur.numerator : 1
+                var den = (dur && dur.denominator) ? dur.denominator : 4
+
+                for (var sidKey in p.noteRowsByStaff) {
+                    if (!p.noteRowsByStaff.hasOwnProperty(sidKey)) continue
+                    var tgtStaff = parseInt(sidKey, 10)
+                    if (isNaN(tgtStaff) || tgtStaff < 0) continue
+
+                    var rows = p.noteRowsByStaff[sidKey] || []
+                    // Skip fast if nothing active on this staff
+                    var anyActive = false
+                    for (var ri = 0; ri < 8 && ri < rows.length; ++ri)
+                        if (rows[ri] && rows[ri].active) { anyActive = true; break }
+                    if (!anyActive) continue
+
+                    // --- Gather desired pitches per voice at this tick ---
+                    var pitchesByVoice = {}   // { "1": [p1,p2,...], "2": [...], ... }
+                    for (var row = 0; row < 8 && row < rows.length; ++row) {
+                        var spec = rows[row]
+                        if (!spec || !spec.active) continue
+
+                        var srcPitch = pitchForRowFromChord(chord, row)
+                        if (srcPitch === null || srcPitch === undefined) continue
+
+                        var destPitch = clampInt(srcPitch + Number(spec.offset || 0), 0, 127)
+                        var voice = clampInt(Number(spec.voice || 1), 1, 4)
+                        var vKey = String(voice)
+                        if (!pitchesByVoice[vKey]) pitchesByVoice[vKey] = []
+
+                        // de‑dupe per voice to avoid duplicate adds
+                        if (pitchesByVoice[vKey].indexOf(destPitch) === -1)
+                            pitchesByVoice[vKey].push(destPitch)
+                    }
+
+                    // --- Write for each voice in one pass (stable stacking) ---
+                    for (var vKey in pitchesByVoice) {
+                        if (!pitchesByVoice.hasOwnProperty(vKey)) continue
+                        var list = pitchesByVoice[vKey]
+                        if (!list || !list.length) continue
+
+                        var voice = parseInt(vKey, 10)
+                        var c2 = curScore.newCursor()
+                        c2.track = tgtStaff * 4 + (voice - 1)
+                        c2.rewindToFraction(frac)
+                        c2.setDuration(num, den)
+
+                        // Ensure a writable slot, then rewind to see the new element
+                        var elNow = c2.element
+                        var isChord = elNow && elNow.type === Element.CHORD
+                        var isRest  = elNow && elNow.type === Element.REST
+                        if (!elNow || (!isChord && !isRest)) {
+                            ensureWritableSlot(c2, num, den)
+                        }
+                        c2.rewindToFraction(frac)
+
+                        // First pitch: decide addToChord based on current element
+                        var addToChord = !!(c2.element && c2.element.type === Element.CHORD)
+                        try { c2.addNote(list[0], addToChord) } catch (eAdd0) {}
+
+                        // Remaining pitches: force stacking into the same chord
+                        for (var k = 1; k < list.length; ++k) {
+                            c2.rewindToFraction(frac)
+                            try { c2.addNote(list[k], true) } catch (eAddN) {}
+                        }
+                        try {
+                            console.log("[Orchestrator] write @tick", frac.ticks, "staff", tgtStaff, "voice", voice, "pitches", list.join(","))
+                        } catch (eDbg) {}
+                    }
+                }
+            }
+        } catch (e) {
+            curScore.endCmd(true)
+            console.log("[Orchestrator] ERROR:", String(e))
+            return
+        }
+        curScore.endCmd()
+    }
+
+    // Apply a specific preset card (by index) to the current selection without
+    // changing the UI selection. Mirrors applyCurrentPresetToSelection().
+    function applyPresetIndexToSelection(index) {
+        if (!curScore || !curScore.selection) return
+        if (!(index >= 0 && index < presets.length)) return
+
+        var p = presets[index]
+        if (!p || !p.noteRowsByStaff) return
+
+        // Determine source (sketch) staff from the selection
+        var srcStaff = -1
+        if (curScore.selection.isRange) {
+            srcStaff = curScore.selection.startStaff
+        } else if (curScore.selection.elements && curScore.selection.elements.length) {
+            for (var ii = 0; ii < curScore.selection.elements.length; ++ii) {
+                var el = curScore.selection.elements[ii]
+                if (el && el.staffIdx !== undefined) { srcStaff = el.staffIdx; break }
+                if (el && el.parent && el.parent.staffIdx !== undefined) { srcStaff = el.parent.staffIdx; break }
+            }
+        }
+        if (!(srcStaff >= 0)) return
+
+        // Collect source chords (normal notes) on that staff within selection
+        var srcChords = collectSourceChordsInSelectionForStaff(srcStaff)
+        if (!srcChords.length) return
+
+        curScore.startCmd(qsTr("Orchestrator apply: %1").arg(String(p.name ?? qsTr("Preset"))))
+        try {
+            for (var ci = 0; ci < srcChords.length; ++ci) {
+                var chord = srcChords[ci]
+                var frac = chord.fraction
+                var dur  = chord.actualDuration
+                var num = (dur && dur.numerator)   ? dur.numerator   : 1
+                var den = (dur && dur.denominator) ? dur.denominator : 4
+
+                for (var sidKey in p.noteRowsByStaff) {
+                    if (!p.noteRowsByStaff.hasOwnProperty(sidKey)) continue
+                    var tgtStaff = parseInt(sidKey, 10)
+                    if (isNaN(tgtStaff) || tgtStaff < 0) continue
+
+                    var rows = p.noteRowsByStaff[sidKey] || []
+                    var anyActive = false
+                    for (var ri = 0; ri < 8 && ri < rows.length; ++ri)
+                        if (rows[ri] && rows[ri].active) { anyActive = true; break }
+                    if (!anyActive) continue
+
+                    // --- Gather desired pitches per voice at this tick ---
+                    var pitchesByVoice = {}
+                    for (var row = 0; row < 8 && row < rows.length; ++row) {
+                        var spec = rows[row]
+                        if (!spec || !spec.active) continue
+
+                        var srcPitch = pitchForRowFromChord(chord, row)
+                        if (srcPitch === null || srcPitch === undefined) continue
+
+                        var destPitch = clampInt(srcPitch + Number(spec.offset || 0), 0, 127)
+                        var voice = clampInt(Number(spec.voice || 1), 1, 4)
+                        var vKey = String(voice)
+                        if (!pitchesByVoice[vKey]) pitchesByVoice[vKey] = []
+                        if (pitchesByVoice[vKey].indexOf(destPitch) === -1)
+                            pitchesByVoice[vKey].push(destPitch)
+                    }
+
+                    // --- Write for each voice in one pass ---
+                    for (var vKey in pitchesByVoice) {
+                        if (!pitchesByVoice.hasOwnProperty(vKey)) continue
+                        var list = pitchesByVoice[vKey]
+                        if (!list || !list.length) continue
+
+                        var voice = parseInt(vKey, 10)
+                        var c2 = curScore.newCursor()
+                        c2.track = tgtStaff * 4 + (voice - 1)
+                        c2.rewindToFraction(frac)
+                        c2.setDuration(num, den)
+
+                        var elNow = c2.element
+                        var isChord = elNow && elNow.type === Element.CHORD
+                        var isRest  = elNow && elNow.type === Element.REST
+                        if (!elNow || (!isChord && !isRest)) {
+                            ensureWritableSlot(c2, num, den)
+                        }
+                        c2.rewindToFraction(frac)
+
+                        var addToChord = !!(c2.element && c2.element.type === Element.CHORD)
+                        try { c2.addNote(list[0], addToChord) } catch (eAdd0) {}
+                        for (var k = 1; k < list.length; ++k) {
+                            c2.rewindToFraction(frac)
+                            try { c2.addNote(list[k], true) } catch (eAddN) {}
+                        }
+                        try {
+                            console.log("[Orchestrator] write @tick", frac.ticks, "staff", tgtStaff, "voice", voice, "pitches", list.join(","))
+                        } catch (eDbg) {}
+                    }
+                }
+            }
+
+        } catch (e) {
+            curScore.endCmd(true)
+            console.log("[Orchestrator] ERROR:", String(e))
+            return
+        }
+        curScore.endCmd()
+    }
+
     // Model: { idx, name }
     ListModel { id: staffListModel }
 
@@ -1232,29 +1566,27 @@ MuseScore {
                                         anchors.fill: parent
                                         radius: parent.radius
 
-                                        // Color logic:
-                                        //   selected  → accentColor (or custom color)
-                                        //   unselected, custom → custom color
-                                        //   unselected, no custom → grey buttonColor
+                                        // Whether the preset has a custom background color
+                                        property bool hasCustomColor: {
+                                            var p = root.presets && root.presets[model.index];
+                                            return (p && p.backgroundColor && String(p.backgroundColor).length);
+                                        }
+
+                                        // Whether this card is selected for editing
+                                        property bool isSelectedInSettings: (root.settingsOpen && card.selected)
+
+                                        // Background color: custom first, otherwise neutral buttonColor
                                         property color baseColor: {
-                                            var p = (root.presets && root.presets[model.index])
-                                                    ? root.presets[model.index]
-                                                    : null;
-
-                                            // 1. Custom color always wins
-                                            if (p && p.backgroundColor && String(p.backgroundColor).length)
-                                                return p.backgroundColor;
-
-                                            // 2. Selected card + settings panel open → accentColor (fallback safe)
-                                            if (card.selected && root.settingsOpen) {
-                                                return ui.theme.accentColor
-                                            }
-
-                                            // 3. Otherwise neutral button background (fallback safe)
-                                            return ui.theme.buttonColor
+                                            if (hasCustomColor)
+                                                return root.presets[model.index].backgroundColor;
+                                            return ui.theme.buttonColor;
                                         }
 
                                         color: baseColor
+
+                                        // ✔ NEW: Selected card always has border in settings mode
+                                        border.width: (isSelectedInSettings ? 2 : 0)
+                                        border.color: ui.theme.fontPrimaryColor
                                     }
 
                                     // Visual states now target the background only (never the content)
@@ -1473,11 +1805,14 @@ MuseScore {
                                         preventStealing: true
 
                                         onClicked: {
-                                            // In normal mode, cards act like momentary buttons
+                                            // Normal mode: fire this preset immediately on current selection
                                             if (!root.settingsOpen) {
+                                                root.applyPresetIndexToSelection(model.index)
                                                 // trigger-only, no selection persistence
                                                 rootUI.selectedIndex = -1
+                                                return
                                             }
+                                            // Settings-open behavior remains selection of the card (handled in onPressed)
                                         }
                                     }
                                 }
@@ -2745,6 +3080,7 @@ MuseScore {
                             // Message text
                             Label {
                                 text: dlg.messageText
+                                width: parent.width
                                 wrapMode: Text.WordWrap
                                 color: ui.theme.fontPrimaryColor
                             }
