@@ -27,7 +27,7 @@ MuseScore {
     description: qsTr("Quickly orchestrate sketches")
     thumbnailName: "orchestrator.png"
     title: qsTr("Orchestrator")
-    version: "0.1.2"
+    version: "0.1.3"
 
 
     // Sprint 1: window base width and settings panel animation
@@ -897,121 +897,290 @@ MuseScore {
         return false
     }
 
+    function orchestratorRowsForStaff(_srcStaff) {
+        // Always route slurs and notes to ALL active (dstStaff, voice) pairs
+        // in the currently selected preset. The source staff is irrelevant.
+        const uiRef = orchestratorWin ? orchestratorWin.rootUIRef : null;
+        if (!uiRef ||
+            uiRef.selectedIndex < 0 ||
+            uiRef.selectedIndex >= presets.length)
+        {
+            return [];
+        }
+
+        const p = presets[uiRef.selectedIndex];
+        if (!p || !p.noteRowsByStaff) return [];
+
+        const out = [];
+
+        // Scan every staff defined in this preset
+        for (let sid in p.noteRowsByStaff) {
+            if (!p.noteRowsByStaff.hasOwnProperty(sid))
+                continue;
+
+            const rows = p.noteRowsByStaff[sid];
+            if (!rows) continue;
+
+            // For each active note-row (0..7), return the destination staff + voice
+            for (let i = 0; i < rows.length; ++i) {
+                const r = rows[i];
+                if (!r || !r.active) continue;
+
+                out.push({
+                    dstStaff: parseInt(sid, 10),
+                    voice: clampInt(Number(r.voice || 1), 1, 4)
+                });
+            }
+        }
+
+        return out;
+    }
+
     // Main entry: apply the current preset to the current selection
     function applyCurrentPresetToSelection() {
-        if (!curScore || !curScore.selection) return
-        var uiRef = orchestratorWin ? orchestratorWin.rootUIRef : null
-        if (!uiRef || uiRef.selectedIndex < 0 || uiRef.selectedIndex >= presets.length) return
-        var p = presets[uiRef.selectedIndex]
-        if (!p || !p.noteRowsByStaff) return
+        if (!curScore || !curScore.selection) return;
 
-        // Determine source (sketch) staff from the selection
-        var srcStaff = -1
-        if (curScore.selection.isRange) {
-            srcStaff = curScore.selection.startStaff
-        } else if (curScore.selection.elements && curScore.selection.elements.length) {
-            // take staff of first chord/note in the selection list
-            for (var ii = 0; ii < curScore.selection.elements.length; ++ii) {
-                var el = curScore.selection.elements[ii]
-                if (el && el.staffIdx !== undefined) { srcStaff = el.staffIdx; break }
-                if (el && el.parent && el.parent.staffIdx !== undefined) { srcStaff = el.parent.staffIdx; break }
+        // --- Resolve the selected preset ---
+        var uiRef = orchestratorWin ? orchestratorWin.rootUIRef : null;
+        if (!uiRef || uiRef.selectedIndex < 0 || uiRef.selectedIndex >= presets.length) return;
+        var p = presets[uiRef.selectedIndex];
+        if (!p || !p.noteRowsByStaff) return;
+
+        // --- Notation filter (needed for slurs, ties, articulations, ornaments) ---
+        var nf = (p.notationFilter ? p.notationFilter : defaultNotationFilter());
+
+        // ------------------------------------------------------------------------
+        // Determine REAL source staff (prefer slur source rather than selection)
+        // ------------------------------------------------------------------------
+        var srcStaff = -1;
+
+        // First: detect slur-based staff
+        if (curScore.spanners && curScore.spanners.length > 0) {
+            for (var i = 0; i < curScore.spanners.length; ++i) {
+                var s = curScore.spanners[i];
+                if (!s) continue;
+
+                var isSlur = false;
+                try { if (typeof Element.SLUR !== "undefined" && s.type === Element.SLUR) isSlur = true; } catch(_) {}
+                try { if (typeof Element.SLUR_SEGMENT !== "undefined" && s.type === Element.SLUR_SEGMENT) isSlur = true; } catch(_) {}
+                if (!isSlur) continue;
+
+                var stf = -1;
+                try { if (s.startElement && s.startElement.staffIdx !== undefined) stf = s.startElement.staffIdx; } catch(_) {}
+                try { if (stf < 0 && s.track !== undefined) stf = Math.floor(s.track / 4); } catch(_) {}
+
+                if (stf >= 0) { srcStaff = stf; break; }
             }
         }
-        if (!(srcStaff >= 0)) {
-            console.log("[Orchestrator] No sketch staff detected from selection; aborting.")
-            return
-        }
 
-        // Gather the source chords on that staff within the selection
-        var srcChords = collectSourceChordsInSelectionForStaff(srcStaff)
-        if (!srcChords.length) return
-
-        var pendingSlurs = queueSlursForOrchestration(p, srcStaff, srcChords);
-
-        // Begin a single undoable command
-        curScore.startCmd(qsTr("Orchestrator apply: %1").arg(String(p.name ?? qsTr("Preset"))))
-        try {
-            // For every source chord, copy rows to every target staff that has them active
-            for (var ci = 0; ci < srcChords.length; ++ci) {
-                var chord = srcChords[ci]
-                var frac = chord.fraction
-                var dur = chord.actualDuration
-                var num = (dur && dur.numerator) ? dur.numerator : 1
-                var den = (dur && dur.denominator) ? dur.denominator : 4
-
-                for (var sidKey in p.noteRowsByStaff) {
-                    if (!p.noteRowsByStaff.hasOwnProperty(sidKey)) continue
-                    var tgtStaff = parseInt(sidKey, 10)
-                    if (isNaN(tgtStaff) || tgtStaff < 0) continue
-
-                    var rows = p.noteRowsByStaff[sidKey] || []
-                    // Skip fast if nothing active on this staff
-                    var anyActive = false
-                    for (var ri = 0; ri < 8 && ri < rows.length; ++ri)
-                        if (rows[ri] && rows[ri].active) { anyActive = true; break }
-                    if (!anyActive) continue
-
-                    // --- Gather desired pitches per voice at this tick ---
-                    var pitchesByVoice = {}   // { "1": [p1,p2,...], "2": [...], ... }
-                    for (var row = 0; row < 8 && row < rows.length; ++row) {
-                        var spec = rows[row]
-                        if (!spec || !spec.active) continue
-
-                        var srcPitch = pitchForRowFromChord(chord, row)
-                        if (srcPitch === null || srcPitch === undefined) continue
-
-                        var destPitch = clampInt(srcPitch + Number(spec.offset || 0), 0, 127)
-                        var voice = clampInt(Number(spec.voice || 1), 1, 4)
-                        var vKey = String(voice)
-                        if (!pitchesByVoice[vKey]) pitchesByVoice[vKey] = []
-
-                        // de‑dupe per voice to avoid duplicate adds
-                        if (pitchesByVoice[vKey].indexOf(destPitch) === -1)
-                            pitchesByVoice[vKey].push(destPitch)
-                    }
-
-                    // --- Write for each voice in one pass (stable stacking) ---
-                    for (var vKey in pitchesByVoice) {
-                        if (!pitchesByVoice.hasOwnProperty(vKey)) continue
-                        var list = pitchesByVoice[vKey]
-                        if (!list || !list.length) continue
-
-                        var voice = parseInt(vKey, 10)
-                        var c2 = curScore.newCursor()
-                        c2.track = tgtStaff * 4 + (voice - 1)
-                        c2.rewindToFraction(frac)
-                        c2.setDuration(num, den)
-
-                        // Ensure a writable slot, then rewind to see the new element
-                        var elNow = c2.element
-                        var isChord = elNow && elNow.type === Element.CHORD
-                        var isRest  = elNow && elNow.type === Element.REST
-                        if (!elNow || (!isChord && !isRest)) {
-                            ensureWritableSlot(c2, num, den)
-                        }
-                        c2.rewindToFraction(frac)
-
-                        // First pitch: decide addToChord based on current element
-                        var addToChord = !!(c2.element && c2.element.type === Element.CHORD)
-                        try { c2.addNote(list[0], addToChord) } catch (eAdd0) {}
-
-                        // Remaining pitches: force stacking into the same chord
-                        for (var k = 1; k < list.length; ++k) {
-                            c2.rewindToFraction(frac)
-                            try { c2.addNote(list[k], true) } catch (eAddN) {}
-                        }
-                        try {
-                            console.log("[Orchestrator] write @tick", frac.ticks, "staff", tgtStaff, "voice", voice, "pitches", list.join(","))
-                        } catch (eDbg) {}
-                    }
+        // Fallback: first element in selection
+        if (srcStaff < 0) {
+            if (curScore.selection.isRange) {
+                srcStaff = curScore.selection.startStaff;
+            } else {
+                for (var ii = 0; ii < curScore.selection.elements.length; ++ii) {
+                    var el = curScore.selection.elements[ii];
+                    var ch = (el && el.parent && el.parent.staffIdx !== undefined) ? el.parent : el;
+                    if (ch && ch.staffIdx !== undefined) { srcStaff = ch.staffIdx; break; }
                 }
             }
-        } catch (e) {
-            curScore.endCmd(true)
-            console.log("[Orchestrator] ERROR:", String(e))
-            return
         }
-        curScore.endCmd()
+
+        if (!(srcStaff >= 0)) {
+            console.log("[Orchestrator] No sketch staff detected from selection; aborting.");
+            return;
+        }
+
+        // ------------------------------------------------------------------------
+        // Gather source chords
+        // ------------------------------------------------------------------------
+        var srcChords = collectSourceChordsInSelectionForStaff(srcStaff);
+        if (!srcChords.length) return;
+
+        // ------------------------------------------------------------------------
+        // PRE-WRITE SLUR DETECTION (your existing working pipeline)
+        // ------------------------------------------------------------------------
+        let pendingSlurs = [];
+        if (nf.slurs && srcChords.length > 0) {
+            const firstTick = srcChords[0].parent.tick;
+            const lastTick = srcChords[srcChords.length - 1].parent.tick + 1;
+            let allow = {};
+            allow[srcStaff] = true;
+
+            buildSlurStartMapFromSpanners(firstTick, lastTick, allow);
+            pendingSlurs = queueSlursForOrchestration(srcStaff, srcChords);
+        }
+
+        console.log("[SLURDBG] pendingSlurs count:", pendingSlurs.length);
+
+        // ------------------------------------------------------------------------
+        // NEW: TIE & SYMBOL QUEUES
+        // ------------------------------------------------------------------------
+        let pendingTies = [];
+        let pendingTiesSeen = {};
+        let pendingSymbols = [];
+
+        // ------------------------------------------------------------------------
+        // WRITE PASS (notes + queue ties + queue symbols)
+        // ------------------------------------------------------------------------
+        curScore.startCmd(qsTr("Orchestrator apply: %1").arg(String(p.name ?? qsTr("Preset"))));
+
+        try {
+            for (var ci = 0; ci < srcChords.length; ++ci) {
+                var chord = srcChords[ci];
+                var frac = chord.fraction;
+                var dur = chord.actualDuration;
+                var num = (dur && dur.numerator) ? dur.numerator : 1;
+                var den = (dur && dur.denominator) ? dur.denominator : 4;
+
+                for (var sidKey in p.noteRowsByStaff) {
+                    if (!p.noteRowsByStaff.hasOwnProperty(sidKey)) continue;
+
+                    var tgtStaff = parseInt(sidKey, 10);
+                    if (isNaN(tgtStaff) || tgtStaff < 0) continue;
+
+                    var rows = p.noteRowsByStaff[sidKey] || [];
+                    var anyActive = false;
+                    for (var ri = 0; ri < 8 && ri < rows.length; ++ri)
+                        if (rows[ri] && rows[ri].active) { anyActive = true; break; }
+                    if (!anyActive) continue;
+
+                    // Per-voice pitch collection
+                    var pitchesByVoice = {};
+                    var tiesByVoice = {};
+
+                    // Collect pitches, ties, symbols from the source chord
+                    for (var row = 0; row < 8 && row < rows.length; ++row) {
+                        var spec = rows[row];
+                        if (!spec || !spec.active) continue;
+
+                        var srcPitch = pitchForRowFromChord(chord, row);
+                        if (srcPitch === null || srcPitch === undefined) continue;
+
+                        var destPitch = clampInt(srcPitch + Number(spec.offset || 0), 0, 127);
+                        var voice = clampInt(Number(spec.voice || 1), 1, 4);
+                        var vKey = String(voice);
+
+                        if (!pitchesByVoice[vKey]) pitchesByVoice[vKey] = [];
+                        if (pitchesByVoice[vKey].indexOf(destPitch) === -1)
+                            pitchesByVoice[vKey].push(destPitch);
+
+                        // ✅ TIE QUEUE
+                        if (nf.ties && sourceHasTieForward(chord, srcPitch)) {
+                            if (!tiesByVoice[vKey]) tiesByVoice[vKey] = [];
+                            if (!tiesByVoice[vKey].includes(destPitch))
+                                tiesByVoice[vKey].push(destPitch);
+                        }
+                    }
+
+                    // ----------------------------------------------------------------
+                    // WRITE NOTES + QUEUE SYMBOLS/TIES PER VOICE
+                    // ----------------------------------------------------------------
+                    for (var vKey in pitchesByVoice) {
+                        if (!pitchesByVoice.hasOwnProperty(vKey)) continue;
+
+                        var list = pitchesByVoice[vKey];
+                        if (!list || !list.length) continue;
+
+                        var voice = parseInt(vKey, 10);
+
+                        var c2 = curScore.newCursor();
+                        c2.track = tgtStaff * 4 + (voice - 1);
+                        c2.rewindToFraction(frac);
+                        c2.setDuration(num, den);
+
+                        var elNow = c2.element;
+                        var isChord = elNow && elNow.type === Element.CHORD;
+                        var isRest  = elNow && elNow.type === Element.REST;
+
+                        if (!elNow || (!isChord && !isRest)) {
+                            ensureWritableSlot(c2, num, den);
+                        }
+                        c2.rewindToFraction(frac);
+
+                        var addToChord = !!(c2.element && c2.element.type === Element.CHORD);
+
+                        try { c2.addNote(list[0], addToChord); } catch(e0) {}
+
+                        for (var k = 1; k < list.length; ++k) {
+                            c2.rewindToFraction(frac);
+                            try { c2.addNote(list[k], true); } catch(eN) {}
+                        }
+
+                        let tTick2 = frac?.ticks ?? 0;
+
+                        // ✅ TIES: queue tie operations
+                        if (nf.ties && tiesByVoice[vKey]) {
+                            for (let dp of tiesByVoice[vKey]) {
+                                let key = `${tgtStaff}:${voice}:${tTick2}:${dp}`;
+                                if (!pendingTiesSeen[key]) {
+                                    pendingTiesSeen[key] = true;
+                                    pendingTies.push({
+                                        tgtStaff: tgtStaff,
+                                        voice: voice,
+                                        tick: tTick2,
+                                        pitch: dp
+                                    });
+                                }
+                            }
+                        }
+
+                        // ✅ SYMBOLS: articulations & ornaments
+                        if (nf.articulations || nf.ornaments) {
+                            let queuedSymbolKeys = {};
+                            if (chord && chord.articulations) {
+                                if (nf.articulations) {
+                                    for (let a of chord.articulations) {
+                                        if (!a) continue;
+                                        let sub = "";
+                                        try { sub = a.subtypeName ? String(a.subtypeName()) : ""; } catch(_){}
+                                        let key = `${a.type}\n${sub}\nchord`;
+
+                                        if (!queuedSymbolKeys[key]) {
+                                            queuedSymbolKeys[key] = true;
+                                            pendingSymbols.push({
+                                                kind: 'chord',
+                                                tgtStaff: tgtStaff,
+                                                voice: voice,
+                                                tick: tTick2,
+                                                src: a,
+                                                srcStaff: srcStaff
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } // end per-voice write
+                } // end per-staff loop
+            } // end per-source-chord loop
+
+        } catch (e) {
+            curScore.endCmd(true);
+            console.log("[Orchestrator] ERROR:", String(e));
+            return;
+        }
+
+        curScore.endCmd();
+
+        // ------------------------------------------------------------------------
+        // POST-WRITE OPERATIONS
+        // ------------------------------------------------------------------------
+
+        // ✅ SLURS
+        if (nf.slurs && pendingSlurs.length > 0) {
+            processPendingSlursAsync(pendingSlurs);
+        }
+
+        // ✅ TIES
+        if (nf.ties && pendingTies.length > 0) {
+            processPendingTiesAsync(pendingTies, 0);
+        }
+
+        // ✅ SYMBOLS (articulations & ornaments)
+        if ((nf.articulations || nf.ornaments) && pendingSymbols.length > 0) {
+            processPendingSymbolsAsync(pendingSymbols, 0);
+        }
     }
 
     // ---------- Notation-copy helpers (normal mode) ----------
@@ -1344,48 +1513,72 @@ MuseScore {
         }
     }
 
-    function processPendingSlursAsync(list, startIndex) {
-        try {
-            var batch = 32; // moderate batch size to keep UI responsive
-            var end = Math.min(list.length, startIndex + batch);
+    //
+    // MuseScore 4.7–compatible slur creation
+    // Slurs can ONLY be created by selecting two notes and calling cmd("add-slur").
+    // Notes and Chords do NOT implement addSpanner() in your build.
+    //
+    function processPendingSlursAsync(slurQueue) {
+        console.log("[SLURDBG] processPendingSlursAsync running, items:", slurQueue.length);
 
-            for (var i = startIndex; i < end; ++i) {
-                var S = list[i];
-                if (!S) continue;
+        for (let S of slurQueue) {
+            console.log(
+                "[SLURDBG] slur attempt:",
+                "tgtStaff=", S.tgtStaff,
+                "voice=", S.voice,
+                "t0=", S.t0,
+                "t1=", S.t1
+            );
 
-                // Find anchors now (score is stable post-commit)
-                var a0 = findAnyAnchorNoteAt(S.tgtStaff, S.voice, S.t0);
-                var a1 = findAnyAnchorNoteAt(S.tgtStaff, S.voice, S.t1);
-                if (!a0 || !a1) continue;
+            // --- Anchor chords from your existing helper ---
+            const ch0 = findAnchorNote(S.tgtStaff, S.voice, S.t0);
+            const ch1 = findAnchorNote(S.tgtStaff, S.voice, S.t1);
 
-                try {
-                    curScore.selection.clear();
-                    curScore.selection.select(a0, true);
-                    curScore.selection.select(a1, true);
-                    cmd("add-slur");
-                    curScore.selection.clear();
-                } catch (eSl) {}
+            if (!ch0 || !ch1) {
+                console.log("[SLURDBG] missing anchor chord(s)");
+                continue;
             }
+
+            // Pick highest note from each chord (your policy)
+            const n0 = ch0.notes.reduce((a,b)=>a.pitch>b.pitch?a:b);
+            const n1 = ch1.notes.reduce((a,b)=>a.pitch>b.pitch?a:b);
+
+            console.log(
+                "[SLURDBG] anchor notes:",
+                "n0?", !!n0,
+                "n1?", !!n1
+            );
+
+            if (!n0 || !n1)
+                continue;
 
             try {
-                console.log("[Orchestrator] slurs created batch", startIndex, "…", end, "of", list.length);
-            } catch (eDbg) {}
+                // -------------------------------------------------------
+                // ✅ MuseScore 4.7 slur creation procedure:
+                // 1. Clear selection
+                // 2. Select start note
+                // 3. Select end note
+                // 4. Call: cmd("add-slur")
+                // -------------------------------------------------------
+                curScore.selection.clear();
+                curScore.selection.select(n0, true);
+                curScore.selection.select(n1, true);
 
-            if (end < list.length) {
-                Qt.callLater(function () { processPendingSlursAsync(list, end); });
-            } else {
-                // chain into ties if they are enabled and queued
-                if (typeof nf !== "undefined" && nf.ties && typeof pendingTies !== "undefined" && pendingTies.length > 0) {
-                    processPendingTiesAsync(pendingTies, 0);
-                }
-            }
-        } catch (eTopSl) {
-            try { console.log("[Orchestrator] slur post-process error:", String(eTopSl)); } catch (eLog) {}
-            // still attempt ties
-            if (typeof nf !== "undefined" && nf.ties && typeof pendingTies !== "undefined" && pendingTies.length > 0) {
-                processPendingTiesAsync(pendingTies, 0);
+                console.log("[SLURDBG] issuing add-slur command");
+                cmd("add-slur");
+
+            } catch (e) {
+                console.log("[SLURDBG] ERROR creating slur via command:", String(e));
             }
         }
+
+        // Final cleanup
+        try { curScore.selection.clear(); } catch(_){}
+    }
+
+    function writeSlursForSelection(srcStaff, srcChords) {
+        const slurQueue = queueSlursForOrchestration(srcStaff, srcChords);
+        Qt.callLater(() => processPendingSlursAsync(slurQueue));
     }
 
     function processPendingTiesAsync(list, startIndex) {
@@ -1572,221 +1765,451 @@ MuseScore {
         return 0;
     }
 
-    // Find the source slur whose start matches t0 (±2) and is on srcStaff (start or end).
-    // Returns its end tick on success; otherwise -1 (caller will use heuristics).
-    // NEW: If end is not exposed and no next start exists, end at the last source chord
-    // in the *same measure* as the start chord (prevents crossing the barline spuriously).
-    function findSourceSlurEndTick(srcStaff, t0, srcChords) {
-        if (!curScore || !curScore.spanners)
-            return -1;
-
-        // Helper: robust start/end tick + staff indices for a slur/spanner
-        function slurInfo(s) {
-            var st = 0, et = 0, sStaff = -1, eStaff = -1;
-            try { if (s.spannerTick  !== undefined) st = fractionToTicks(s.spannerTick);  } catch (e0) {}
-            if (!st) { try { if (s.tick  !== undefined) st = fractionToTicks(s.tick);  } catch (e1) {} }
-            if (!st) { try { if (s.startSegment && s.startSegment.tick !== undefined) st = fractionToTicks(s.startSegment.tick); } catch (e2) {} }
-
-            try { if (s.spannerTick2 !== undefined) et = fractionToTicks(s.spannerTick2); } catch (e3) {}
-            if (!et) { try { if (s.tick2 !== undefined) et = fractionToTicks(s.tick2); } catch (e4) {} }
-            if (!et) { try { if (s.endSegment && s.endSegment.tick !== undefined) et = fractionToTicks(s.endSegment.tick); } catch (e5) {} }
-
-            try { if (s.staff && s.staff.index !== undefined) sStaff = s.staff.index; } catch (eS) {}
-            if (sStaff < 0) { try { if (s.track !== undefined) sStaff = Math.floor(s.track / 4); } catch (eT) {} }
-            try { if (s.spannerTrack2 !== undefined) eStaff = Math.floor(s.spannerTrack2 / 4); } catch (eT2) {}
-
-            return { st: st, et: et, sStaff: sStaff, eStaff: eStaff };
-        }
-
-        var sp = curScore.spanners;
-        var matchedStart = false;
-        var nextStartAfter = -1;
-
-        for (var i = 0; i < sp.length; ++i) {
-            var s = sp[i]; if (!s) continue;
-            var isSlur = (s.type === Element.SLUR) ||
-                         (typeof Element.SLUR_SEGMENT !== "undefined" && s.type === Element.SLUR_SEGMENT);
-            if (!isSlur) continue;
-
-            var info = slurInfo(s);
-
-            var staffMatches = (info.sStaff === srcStaff) ||
-                               (info.eStaff === srcStaff) ||
-                               (info.sStaff < 0 && info.eStaff < 0);
-
-            // --- NEW: Attempt precise end-tick extraction from slur segments ---
-            var segEndTick = -1;
+    //
+    // 4.7-aware slur info extractor
+    //
+    function slurInfo(slur) {
+        // Convert Fraction-like or raw values into ticks
+        function toTicks(v) {
+            if (!v) return 0;
+            if (typeof v === "number") return v;
             try {
-                if (s.segments && s.segments.length > 0) {
-                    // Look for last segment that defines an end anchor
-                    for (var si = s.segments.length - 1; si >= 0; --si) {
-                        var seg = s.segments[si];
-                        if (!seg) continue;
-
-                        // Prefer segment.tick2 if present
-                        if (seg.tick2 !== undefined && seg.tick2 !== null) {
-                            segEndTick = fractionToTicks(seg.tick2);
-                            break;
-                        }
-
-                        // Fallback: segment.tick (sometimes equals end)
-                        if (seg.tick !== undefined && seg.tick !== null) {
-                            segEndTick = fractionToTicks(seg.tick);
-                            break;
-                        }
-
-                        // Fallback: endSegment.tick if present on segment
-                        if (seg.endSegment && seg.endSegment.tick !== undefined) {
-                            segEndTick = fractionToTicks(seg.endSegment.tick);
-                            break;
-                        }
-                    }
+                if (v.ticks !== undefined)
+                    return parseInt(v.ticks, 10);
+            } catch (_) {}
+            try {
+                if (v.numerator !== undefined && v.denominator !== undefined) {
+                    var num = parseInt(v.numerator, 10);
+                    var den = parseInt(v.denominator, 10);
+                    if (!isNaN(num) && !isNaN(den) && den !== 0)
+                        return Math.floor((num * division) / den);
                 }
-            } catch (eSeg) {
-                segEndTick = -1;
-            }
-
-            // If we got a real segment-based end-tick, use it immediately.
-            if (segEndTick > 0) {
-                try { console.log("[Orchestrator] slur end from segments:", segEndTick); } catch(_) {}
-                return segEndTick;
-            }
-
-            if (staffMatches && info.st > t0 && (nextStartAfter < 0 || info.st < nextStartAfter))
-                nextStartAfter = info.st;
-
-            var tickMatches = (Math.abs(info.st - t0) <= 2);
-            if (staffMatches && tickMatches) {
-                matchedStart = true;
-                if (info.et > 0) {
-                    try { console.log("[Orchestrator] matched source slur: st", info.st, "et", info.et, "t0", t0); } catch(_) {}
-                    return info.et;
-                }
-                try { console.log("[Orchestrator] matched start but et=0; will try fallbacks st", info.st, "t0", t0); } catch(_) {}
-            }
+            } catch (_) {}
+            return 0;
         }
 
-        // Fallback A: end at the next slur's start on this staff (if any)
-        if (matchedStart && nextStartAfter > t0) {
-            try { console.log("[Orchestrator] using next slur start as end:", nextStartAfter); } catch(_) {}
-            return nextStartAfter;
+        // ---------------------------
+        // 4.7‑aware start tick
+        // ---------------------------
+        let st = 0;
+
+        // 1) spannerTick
+        try {
+            if (slur.spannerTick !== undefined)
+                st = toTicks(slur.spannerTick);
+        } catch (_) {}
+
+        // 2) tick
+        if (!st) {
+            try {
+                if (slur.tick !== undefined)
+                    st = toTicks(slur.tick);
+            } catch (_) {}
         }
 
-        // ---------- NEW Fallback B: stay within the start measure ----------
-        if (matchedStart && srcChords && srcChords.length > 0) {
-            // Find the start chord object for t0 (allow ±2 ticks)
-            function chordTick(ch) {
-                return (ch && ch.fraction && ch.fraction.ticks !== undefined)
-                    ? ch.fraction.ticks
-                    : (ch && ch.parent && ch.parent.tick !== undefined)
-                        ? ch.parent.tick
-                        : 0;
-            }
-            var startChord = null;
-            for (var ci = 0; ci < srcChords.length; ++ci) {
-                var tt = chordTick(srcChords[ci]);
-                if (Math.abs(tt - t0) <= 2) { startChord = srcChords[ci]; break; }
-            }
-
-            if (startChord && startChord.measure !== undefined) {
-                var startMeasure = startChord.measure; // compare by object identity
-                var lastSameMeasureTick = t0;
-
-                for (var cj = ci + 1; cj < srcChords.length; ++cj) {
-                    var ch = srcChords[cj];
-                    if (!ch) break;
-                    if (ch.measure !== startMeasure) break; // crossed the barline
-                    var tt2 = chordTick(ch);
-                    if (tt2 >= lastSameMeasureTick) lastSameMeasureTick = tt2;
-                }
-
-                if (lastSameMeasureTick > t0) {
-                    try { console.log("[Orchestrator] using last source chord in SAME MEASURE as end:", lastSameMeasureTick); } catch(_) {}
-                    return lastSameMeasureTick;
-                }
-            }
+        // 3) startSegment.tick
+        if (!st) {
+            try {
+                if (slur.startSegment && slur.startSegment.tick !== undefined)
+                    st = toTicks(slur.startSegment.tick);
+            } catch (_) {}
         }
 
-        // Old fallback (kept as last resort): end at the last source chord tick inside selection window
-        if (matchedStart) {
-            var last = -1;
-            // If srcChords were provided, use them; else recompute
-            var chords = (srcChords && srcChords.length) ? srcChords : collectSourceChordsInSelectionForStaff(srcStaff);
-            for (var k = 0; k < chords.length; ++k) {
-                var ch2 = chords[k];
-                var tt3 = (ch2.fraction && ch2.fraction.ticks !== undefined) ? ch2.fraction.ticks
-                         : (ch2.parent && ch2.parent.tick !== undefined) ? ch2.parent.tick : 0;
-                if (tt3 > last) last = tt3;
-            }
-            if (last >= t0) {
-                try { console.log("[Orchestrator] using last source chord tick as end:", last); } catch(_) {}
-                return last;
-            }
+        // 4) segment[0] fallback
+        if (!st && slur.segments && slur.segments.length > 0) {
+            try {
+                const seg0 = slur.segments[0];
+                if (seg0.tick !== undefined)
+                    st = toTicks(seg0.tick);
+                else if (seg0.startSegment && seg0.startSegment.tick !== undefined)
+                    st = toTicks(seg0.startSegment.tick);
+            } catch (_) {}
         }
 
-        return -1;
+        // ---------------------------
+        // 4.7‑aware end tick
+        // ---------------------------
+        let et = 0;
+
+        // 1) spannerTick2
+        try {
+            if (slur.spannerTick2 !== undefined)
+                et = toTicks(slur.spannerTick2);
+        } catch (_) {}
+
+        // 2) tick2
+        if (!et) {
+            try {
+                if (slur.tick2 !== undefined)
+                    et = toTicks(slur.tick2);
+            } catch (_) {}
+        }
+
+        // 3) endSegment.tick
+        if (!et) {
+            try {
+                if (slur.endSegment && slur.endSegment.tick !== undefined)
+                    et = toTicks(slur.endSegment.tick);
+            } catch (_) {}
+        }
+
+        // 4) last segment fallback
+        if (!et && slur.segments && slur.segments.length > 0) {
+            try {
+                const segLast = slur.segments[slur.segments.length - 1];
+                if (segLast.tick2 !== undefined)
+                    et = toTicks(segLast.tick2);
+                else if (segLast.tick !== undefined)
+                    et = toTicks(segLast.tick);
+                else if (segLast.endSegment && segLast.endSegment.tick !== undefined)
+                    et = toTicks(segLast.endSegment.tick);
+            } catch (_) {}
+        }
+
+        // ---------------------------
+        // Resolve start staff
+        // ---------------------------
+        let sStaff = -1;
+        try {
+            if (slur.track !== undefined)
+                sStaff = Math.floor(slur.track / 4);
+        } catch (_) {}
+
+        // fallback: spannerTrack2
+        if (sStaff < 0) {
+            try {
+                if (slur.spannerTrack2 !== undefined)
+                    sStaff = Math.floor(slur.spannerTrack2 / 4);
+            } catch (_) {}
+        }
+
+        // fallback: segment[0].element.track
+        if (sStaff < 0 && slur.segments && slur.segments.length > 0) {
+            try {
+                const seg0 = slur.segments[0];
+                if (seg0.element && seg0.element.track !== undefined)
+                    sStaff = Math.floor(seg0.element.track / 4);
+            } catch (_) {}
+        }
+
+        // ---------------------------
+        // Resolve end staff
+        // ---------------------------
+        let eStaff = -1;
+        try {
+            if (slur.spannerTrack2 !== undefined)
+                eStaff = Math.floor(slur.spannerTrack2 / 4);
+        } catch (_) {}
+
+        // fallback: track for 1‑segment slur cases
+        if (eStaff < 0) {
+            try {
+                if (slur.track !== undefined)
+                    eStaff = Math.floor(slur.track / 4);
+            } catch (_) {}
+        }
+
+        // fallback: end segment element
+        if (eStaff < 0 && slur.segments && slur.segments.length > 0) {
+            try {
+                const segLast = slur.segments[slur.segments.length - 1];
+                if (segLast.element && segLast.element.track !== undefined)
+                    eStaff = Math.floor(segLast.element.track / 4);
+            } catch (_) {}
+        }
+
+        return { st, et, sStaff, eStaff };
     }
 
-    // Build a map of slur starts from curScore.spanners within [startTick, endTick),
-    // optionally restricted to a set of allowed staves.
-    // Produces: root.slurStartByStaff[staffKey][tick] = true, with "_any" fallback.
+    //
+    // Option‑2 slur end resolution for MS4.7
+    // 1) Reconstruct true source‑slur end (t1src) from srcChords
+    // 2) Snap to next chord on target staff/voice (Option 2 behavior)
+    //
+    function findSourceSlurEndTick(slur, t0, srcChords, tgtStaff, voice) {
+
+        // --- Helper: get chord tick from chord element ---
+        function chordTick(ch) {
+            if (!ch) return 0;
+            try {
+                if (ch.fraction && ch.fraction.ticks !== undefined)
+                    return ch.fraction.ticks;
+            } catch (_) {}
+            try {
+                if (ch.parent && ch.parent.tick !== undefined)
+                    return ch.parent.tick;
+            } catch (_) {}
+            return 0;
+        }
+
+        // ============================================================
+        // 1) Reconstruct TRUE source end tick (t1src)
+        // ============================================================
+        // MS4.7 slurs supply no endTick, so infer from the source slur span.
+        // Find the last srcChord whose tick is >= t0 (start) and part of the span.
+        //
+        let t1src = t0;
+        for (let i = 0; i < srcChords.length; i++) {
+            const ch = srcChords[i];
+            const tick = chordTick(ch);
+            if (tick >= t0) {
+                t1src = tick;      // advance end as far as chords go
+            }
+        }
+
+        // t1src now equals the tick of the last source chord spanned by the slur.
+        // (Example: 12480)
+
+        // ============================================================
+        // 2) Option‑2 snapping:
+        // Snap to target staff’s next chord >= t1src.
+        // ============================================================
+        function findNextTargetChordTick(staffIdx, voice, startTick) {
+            try {
+                const c = curScore.newCursor();
+                c.track = staffIdx * 4 + (voice - 1);
+                c.rewindToTick(startTick);
+
+                // Try exact or later ticks
+                while (c.segment) {
+                    const el = c.element;
+                    if (el && el.type === Element.CHORD)
+                        return c.tick;
+                    if (!c.next()) break;
+                }
+            } catch (_) {}
+            return null;
+        }
+
+        const snapped = findNextTargetChordTick(tgtStaff, voice, t1src);
+
+        // If target has a chord after t1src → use it
+        if (snapped !== null)
+            return snapped;
+
+        // Else fallback to raw t1src
+        return t1src;
+    }
+
+    //
+    // Robust anchor note search: search ±3 ticks,
+    // then fallback to nearest chord.
+    //
+    function findAnchorNote(staff, voice, tick) {
+        const c = curScore.newCursor();
+        c.track = staff * 4 + (voice - 1);
+
+        const candidates = [tick, tick - 1, tick + 1, tick - 2, tick + 2, tick - 3, tick + 3];
+
+        for (let tt of candidates) {
+            c.rewindToTick(tt);
+            if (c.element && c.element.type === Element.CHORD)
+                return c.element;
+        }
+
+        // find nearest chord:
+        let nearest = null;
+        let bestDist = 999999;
+
+        for (let delta = -30; delta <= 30; delta++) {
+            let tt = tick + delta;
+            c.rewindToTick(tt);
+            if (c.element && c.element.type === Element.CHORD) {
+                const d = Math.abs(delta);
+                if (d < bestDist) { bestDist = d; nearest = c.element; }
+            }
+        }
+
+        return nearest;
+    }
+
     function buildSlurStartMapFromSpanners(startTick, endTick, allowedMap) {
         root.slurStartByStaff = ({});
         if (!curScore || !curScore.spanners)
             return;
 
-        var sp = curScore.spanners;
-        for (var i = 0; i < sp.length; ++i) {
-            var s = sp[i];
-            if (!s)
+        const sp = curScore.spanners;
+        for (let i = 0; i < sp.length; ++i) {
+            const s = sp[i];
+            if (!s) continue;
+
+            // DEBUG LOG (unchanged)
+            console.log("[SLURDBG] spanner[" + i + "] type:", s.type,
+                        "track:", s.track,
+                        "spannerTrack2:", s.spannerTrack2,
+                        "segments:", (s.segments ? s.segments.length : 0));
+
+            // ---------------------------------------------------------------------
+            // FIX: Accept both Element.SLUR and Element.SLUR_SEGMENT
+            // ---------------------------------------------------------------------
+            let isSlur = false;
+            try {
+                if (typeof Element.SLUR !== "undefined" && s.type === Element.SLUR)
+                    isSlur = true;
+            } catch (_) {}
+
+            try {
+                if (typeof Element.SLUR_SEGMENT !== "undefined" && s.type === Element.SLUR_SEGMENT)
+                    isSlur = true;
+            } catch (_) {}
+
+            if (!isSlur) {
+                console.log("[SLURDBG] spanner[" + i + "] skipped: not a slur");
                 continue;
+            }
 
-            // Prefer whole SLUR elements; accept SLUR_SEGMENT as a fallback on builds that expose segments.
-            var isSlur =
-                    (s.type === Element.SLUR) ||
-                    (typeof Element.SLUR_SEGMENT !== "undefined" && s.type === Element.SLUR_SEGMENT);
-            if (!isSlur)
-                continue;
+            // ---------------------------------------------------------------------
+            // FIX: Determine tStart even when segments.length === 0
+            // ---------------------------------------------------------------------
+            let tStart = 0;
 
-            // Start tick: try spannerTick, then tick, then startSegment.tick
-            var tStart = 0;
-            try { if (s.spannerTick !== undefined) tStart = fractionToTicks(s.spannerTick); } catch (e0) {}
-            if (!tStart) { try { if (s.tick !== undefined) tStart = fractionToTicks(s.tick); } catch (e1) {} }
-            if (!tStart) { try { if (s.startSegment && s.startSegment.tick !== undefined) tStart = fractionToTicks(s.startSegment.tick); } catch (e2) {} }
+            // 1) spannerTick (preferred if present)
+            try {
+                if (s.spannerTick !== undefined)
+                    tStart = fractionToTicks(s.spannerTick);
+            } catch (_) {}
 
+            // 2) tick (sometimes 4.x provides this)
+            if (!tStart) {
+                try {
+                    if (s.tick !== undefined)
+                        tStart = fractionToTicks(s.tick);
+                } catch (_) {}
+            }
+
+            // 3) startSegment.tick
+            if (!tStart) {
+                try {
+                    if (s.startSegment && s.startSegment.tick !== undefined)
+                        tStart = fractionToTicks(s.startSegment.tick);
+                } catch (_) {}
+            }
+
+            // 4) segments[0]
+            if (!tStart && s.segments && s.segments.length > 0) {
+                const seg0 = s.segments[0];
+                try {
+                    if (seg0.tick !== undefined)
+                        tStart = fractionToTicks(seg0.tick);
+                    else if (seg0.startSegment && seg0.startSegment.tick !== undefined)
+                        tStart = fractionToTicks(seg0.startSegment.tick);
+                } catch (_) {}
+            }
+
+            console.log("[SLURDBG] candidate slur start",
+                        "i:", i,
+                        "tStart:", tStart,
+                        "startTick:", startTick,
+                        "endTick:", endTick);
+
+            if (!tStart) continue;
             if (tStart < startTick || tStart >= endTick)
                 continue;
 
-            // Staff at slur start: prefer s.staff.index; else derive from track
-            var staffIdx = -1;
-            try { if (s.staff && s.staff.index !== undefined) staffIdx = s.staff.index; } catch (eS) {}
-            if (staffIdx < 0) { try { if (s.track !== undefined) staffIdx = Math.floor(s.track / 4); } catch (eT) {} }
+            // ---------------------------------------------------------------------
+            // FIX: Resolve staff from multiple possible fields
+            // ---------------------------------------------------------------------
+            let staffIdx = -1;
+            try {
+                if (s.track !== undefined)
+                    staffIdx = Math.floor(s.track / 4);
+            } catch (_) {}
 
-            // Respect the allowed staff window, if provided
-            if (allowedMap && staffIdx >= 0 && allowedMap.hasOwnProperty(staffIdx) && !allowedMap[staffIdx])
+            if (staffIdx < 0) {
+                try {
+                    if (s.spannerTrack2 !== undefined)
+                        staffIdx = Math.floor(s.spannerTrack2 / 4);
+                } catch (_) {}
+            }
+
+            if (staffIdx < 0 && s.segments && s.segments.length > 0) {
+                const seg0 = s.segments[0];
+                try {
+                    if (seg0.element && seg0.element.track !== undefined)
+                        staffIdx = Math.floor(seg0.element.track / 4);
+                } catch (_) {}
+            }
+
+            // FINAL fallback
+            if (staffIdx < 0)
+                staffIdx = "_any";
+
+            console.log("[SLURDBG] slur @ tStart:", tStart,
+                        "resolved staff:", staffIdx);
+
+            // ---------------------------------------------------------------------
+            // Allowed-staff filtering
+            // ---------------------------------------------------------------------
+            if (allowedMap &&
+                staffIdx >= 0 &&
+                allowedMap.hasOwnProperty(staffIdx) &&
+                !allowedMap[staffIdx])
                 continue;
 
-            var key = (staffIdx >= 0) ? String(staffIdx) : "_any";
+            const key = String(staffIdx);
             if (!root.slurStartByStaff[key])
                 root.slurStartByStaff[key] = ({});
+
             root.slurStartByStaff[key][tStart] = true;
+
+            console.log("[SLURDBG] ✅ RECORDED slur start: staff", key, "tick", tStart);
         }
     }
 
-    // Tolerant probe: does a slur start on 'srcStaff' at 'tick' (or ±1 tick)?
+
     function slurStartAtStaffTick(srcStaff, tick) {
-        var key = String(srcStaff);
-
-        function hasAt(k, t) {
-            try { return !!(root.slurStartByStaff && root.slurStartByStaff[k] && root.slurStartByStaff[k][t]); }
-            catch (e) { return false; }
+        // Helper to test presence safely
+        function hasAt(staffKey, t) {
+            try {
+                return !!(
+                    root.slurStartByStaff &&
+                    root.slurStartByStaff[staffKey] &&
+                    root.slurStartByStaff[staffKey][t]
+                );
+            } catch (e) {
+                return false;
+            }
         }
 
-        // exact + ±1, with _any fallback
-        return hasAt(key, tick) || hasAt("_any", tick)
-                || hasAt(key, tick - 1) || hasAt("_any", tick - 1)
-                || hasAt(key, tick + 1) || hasAt("_any", tick + 1);
+        // Keys we should probe:
+        // 1. The exact staff index as a string   → "0", "1", "2", ...
+        // 2. The fallback bucket                 → "_any"
+        const staffKey = String(srcStaff);
+
+        // Candidate ticks to test, with ±1 wiggle
+        const candidates = [tick, tick - 1, tick + 1];
+
+        // Check explicit staff assignment first
+        for (let t of candidates) {
+            if (hasAt(staffKey, t)) {
+                console.log("[SLURDBG] probe slurStartAtStaffTick",
+                            "staff=", srcStaff,
+                            "tick=", tick,
+                            "result=true (staffKey:", staffKey, ")");
+                return true;
+            }
+        }
+
+        // Check wildcard slurs ("_any") second
+        for (let t of candidates) {
+            if (hasAt("_any", t)) {
+                console.log("[SLURDBG] probe slurStartAtStaffTick",
+                            "staff=", srcStaff,
+                            "tick=", tick,
+                            "result=true (staffKey:_any)");
+                return true;
+            }
+        }
+
+        // Nothing matched
+        console.log("[SLURDBG] probe slurStartAtStaffTick",
+                    "staff=", srcStaff,
+                    "tick=", tick,
+                    "result=false");
+        return false;
     }
+
+
 
     // From the preset rows for a staff, return unique voices (1..4) that are active.
     function activeVoicesFromRows(rows) {
@@ -1800,404 +2223,309 @@ MuseScore {
         return out;
     }
 
-    function queueSlursForOrchestration(p, srcStaff, srcChords) {
-        //-------------------------------------------------------------
-        //  STEP 2: Slur Queueing using Keyswitch Creator method
-        //-------------------------------------------------------------
+    function queueSlursForOrchestration(srcStaff, srcChords) {
+        const uiRef = orchestratorWin ? orchestratorWin.rootUIRef : null;
+        if (!uiRef || uiRef.selectedIndex < 0 || uiRef.selectedIndex >= presets.length)
+            return [];
 
-        // We will fill this array with slur instances to be created after note writing.
-        var pendingSlurs = [];
+        const p = presets[uiRef.selectedIndex];
+        if (!p || !p.noteRowsByStaff)
+            return [];
 
-        // 1) Compute the tick window from the source chords.
-        var minT = 999999999;
-        var maxT = -1;
+        const sp = curScore.spanners;
+        let queued = [];
 
-        for (var ci = 0; ci < srcChords.length; ++ci) {
-            var ch = srcChords[ci];
-            var tt = 0;
+        console.log("[SLURDBG] ==== QUEUE SLURS BEGIN ====");
+        console.log("[SLURDBG] srcStaff =", srcStaff);
+        console.log("[SLURDBG] srcChordCount =", srcChords.length);
 
-            if (ch.fraction && ch.fraction.ticks !== undefined)
-                tt = ch.fraction.ticks;
-            else if (ch.parent && ch.parent.tick !== undefined)
-                tt = ch.parent.tick;
+        for (let i = 0; i < sp.length; ++i) {
+            let slur = sp[i];
+            console.log("[SLURDBG] queue pass slur index", i,
+                        "type:", slur ? slur.type : null,
+                        "track:", slur ? slur.track : null);
 
-            if (tt < minT) minT = tt;
-            if (tt > maxT) maxT = tt;
-        }
-
-        // 2) Build the slur-start map for exactly the time/staff window we care about.
-        var allow = {};
-        allow[srcStaff] = true;
-
-        // (diagnostic) what do we actually see in curScore.spanners?
-        try {
-            var N = (curScore && curScore.spanners) ? curScore.spanners.length : 0;
-            console.log("[Orchestrator] spanners.length =", N, "window", minT, "..", (maxT + 1), "srcStaff", srcStaff);
-            var dump = 0;
-            for (var iD = 0; iD < N && dump < 12; ++iD) {
-                var sD = curScore.spanners[iD];
-                if (!sD) continue;
-                var typ = sD.type;
-                // Attempt to read start tick in a tolerant way (same as builder)
-                var tD = 0;
-                try { if (sD.spannerTick !== undefined) tD = fractionToTicks(sD.spannerTick); } catch (e0) {}
-                if (!tD) { try { if (sD.tick !== undefined) tD = fractionToTicks(sD.tick); } catch (e1) {} }
-                if (!tD) { try { if (sD.startSegment && sD.startSegment.tick !== undefined) tD = fractionToTicks(sD.startSegment.tick); } catch (e2) {} }
-                // try staff
-                var stD = -1;
-                try { if (sD.staff && sD.staff.index !== undefined) stD = sD.staff.index; } catch (eS) {}
-                if (stD < 0) { try { if (sD.track !== undefined) stD = Math.floor(sD.track / 4); } catch (eT) {} }
-                if (typ === Element.SLUR || (typeof Element.SLUR_SEGMENT !== "undefined" && typ === Element.SLUR_SEGMENT)) {
-                    console.log("[Orchestrator] SLUR*", "startTick", tD, "staff", stD);
-                    dump++;
-                }
-            }
-        } catch (eLog) {}
-
-        buildSlurStartMapFromSpanners(minT, maxT + 1, allow);
-
-        // (diagnostic) how many starts were recorded for the source staff?
-        try {
-            var keySrc = String(srcStaff), cnt = 0;
-            if (root.slurStartByStaff && root.slurStartByStaff[keySrc]) {
-                for (var tK in root.slurStartByStaff[keySrc]) cnt++;
-            }
-            console.log("[Orchestrator] slurStartByStaff[" + keySrc + "] count =", cnt);
-        } catch (eMap) {}
-
-        // 3) For each destination staff, queue slurs for the voices the preset will write,
-        // not based on whether a target chord already exists (it won't yet).
-        for (var sidKey in p.noteRowsByStaff) {
-            var tgtStaff = parseInt(sidKey, 10);
-            if (isNaN(tgtStaff) || tgtStaff < 0)
+            if (!slur)
                 continue;
 
-            // Which voices are active on this destination staff?
-            var rowsHere = p.noteRowsByStaff[sidKey] || [];
-            var vList = activeVoicesFromRows(rowsHere);
+            // Identify slur-type spanners robustly
+            let isSlur = false;
+            try { if (typeof Element.SLUR !== "undefined" && slur.type === Element.SLUR) isSlur = true; } catch (_) {}
+            try { if (typeof Element.SLUR_SEGMENT !== "undefined" && slur.type === Element.SLUR_SEGMENT) isSlur = true; } catch (_) {}
 
-            for (var ci = 0; ci < srcChords.length; ++ci) {
-                var ch = srcChords[ci];
-                var t0 = 0;
-                if (ch.fraction && ch.fraction.ticks !== undefined)
-                    t0 = ch.fraction.ticks;
-                else if (ch.parent && ch.parent.tick !== undefined)
-                    t0 = ch.parent.tick;
+            if (!isSlur) {
+                console.log("[SLURDBG]   not a slur → skip");
+                continue;
+            }
 
-                var hasStartHere = slurStartAtStaffTick(srcStaff, t0);
+            console.log("[SLURDBG]   slur accepted into queue pass:", i);
 
-                if (hasStartHere) {
-                    // Prefer the original source slur’s end; fallback to heuristic if unavailable.
-                    var t1Src = findSourceSlurEndTick(srcStaff, t0, srcChords);
-                    for (var vi = 0; vi < vList.length; ++vi) {
-                        var voice = vList[vi];
-                        var t1 = (t1Src >= 0) ? t1Src : resolveSlurEndTick(tgtStaff, voice, t0, srcStaff, srcChords);
-                        if (t1 < t0) t1 = t0; // guard against bad metadata
-                        pendingSlurs.push({ tgtStaff: tgtStaff, voice: voice, t0: t0, t1: t1 });
+            // Extract raw slur info
+            let info = slurInfo(slur);
+            let t0 = info.st;
+            let t1src = info.et;   // (may be 0 in MS4.7)
 
-                        try {
-                            console.log("[Orchestrator] queue slur", "staff", tgtStaff, "v", voice, "t0", t0, "t1", t1,
-                                        (t1Src >= 0 ? "(from source)" : "(heuristic)"));
-                        } catch (eDbg) {}
-                    }
+            console.log("[SLURDBG]   slurInfo:",
+                        "t0=", info.st,
+                        "t1=", info.et,
+                        "sStaff=", info.sStaff,
+                        "eStaff=", info.eStaff);
+
+            let present = slurStartAtStaffTick(srcStaff, t0);
+
+            try {
+                const staffKey = String(srcStaff);
+                console.log("[SLURDBG]   slurStartByStaff keys:", Object.keys(root.slurStartByStaff));
+                console.log("[SLURDBG]   bucket for srcStaff =", staffKey, ":", root.slurStartByStaff[staffKey]);
+                console.log("[SLURDBG]   wildcard bucket (_any):", root.slurStartByStaff["_any"]);
+            } catch (eMap) {}
+
+            console.log("[SLURDBG]   slurStartAtStaffTick returned:", present);
+
+            if (!present) {
+                console.log("[SLURDBG]   ----- SLUR REJECTED BEFORE DESTINATION LOOP -----");
+                continue;
+            }
+
+            console.log("[SLURDBG]   ✅ ACCEPTED slur for queuing — checking destination rows…");
+
+            // ======================================================
+            // ✅ Iterate destination staves — THIS IS WHERE t1 BELONGS
+            // ======================================================
+            for (let sidKey in p.noteRowsByStaff) {
+                if (!p.noteRowsByStaff.hasOwnProperty(sidKey))
+                    continue;
+
+                const dstStaff = parseInt(sidKey, 10);
+                if (isNaN(dstStaff) || dstStaff < 0)
+                    continue;
+
+                const rows = p.noteRowsByStaff[sidKey];
+
+                console.log("[SLURDBG]     check dstStaff:", sidKey,
+                            "rows valid?", Array.isArray(rows),
+                            "anyActive?", (function() {
+                                if (!Array.isArray(rows)) return false;
+                                for (let r of rows) if (r && r.active) return true;
+                                return false;
+                            })());
+
+                if (!Array.isArray(rows)) {
+                    console.log("[SLURDBG]     ⚠️ Skipping staff", sidKey, "because rows is not an array:", rows);
+                    continue;
+                }
+
+                // ---------------------------------------
+                // ✅ Per-row (voice) slur generation
+                // ---------------------------------------
+                for (let ri = 0; ri < rows.length; ++ri) {
+                    const r = rows[ri];
+
+                    console.log("[SLURDBG]       row", ri,
+                                "exists?", !!r,
+                                "active?", r && r.active,
+                                "voice", r ? r.voice : "(null)");
+
+                    if (!r || typeof r !== "object")
+                        continue;
+
+                    if (!r.active)
+                        continue;
+
+                    const voice = clampInt(Number(r.voice ?? 1), 1, 4);
+
+                    // ✅ ✅ ✅ OPTION 2 SNAP LOGIC HERE
+                    const t1 = findSourceSlurEndTick(
+                        slur,
+                        t0,
+                        srcChords,
+                        dstStaff,
+                        voice
+                    );
+
+                    const item = {
+                        tgtStaff: dstStaff,
+                        voice: voice,
+                        t0: t0,
+                        t1: t1
+                    };
+
+                    console.log("[SLURDBG]       ✅ QUEUED slur for dstStaff:",
+                                dstStaff, "voice:", voice,
+                                "t0:", t0, "t1:", t1);
+
+                    queued.push(item);
                 }
             }
         }
 
-        try {
-            console.log("[Orchestrator] queued slurs:", pendingSlurs.length);
-        } catch (_) {}
+        console.log("[SLURDBG] ==== QUEUE SLURS END ====");
+        console.log("[SLURDBG] total queued slurs:", queued.length);
 
-        return pendingSlurs;
+        return queued;
     }
-
 
     // Apply a specific preset card (by index) to the current selection without
     // changing the UI selection. Mirrors applyCurrentPresetToSelection().
     function applyPresetIndexToSelection(index) {
-        if (!curScore || !curScore.selection) return
-        if (!(index >= 0 && index < presets.length)) return
-        var p = presets[index]
-        if (!p || !p.noteRowsByStaff) return
+        if (!curScore || !curScore.selection) return;
+        if (!(index >= 0 && index < presets.length)) return;
 
-        // Accumulate forward ties we must recreate on destination:
-        // objects of {tgtStaff, voice, tick, pitch}
-        var pendingTies = []
-        var pendingTiesSeen = {} // key: staff:voice:tick:pitch -> true
+        var p = presets[index];
+        if (!p || !p.noteRowsByStaff) return;
 
-        // NEW: Accumulate articulations/ornaments/fermatas to clone *after* endCmd
-        // Each item: { kind: 'chord'|'note', tgtStaff, voice, tick, [pitch], src }
-        var pendingSymbols = []
+        var pendingTies = [];
+        var pendingTiesSeen = {};
+        var pendingSymbols = [];
 
-        // Convenience: current preset’s notation filter (with safe defaults)
-        var nf = (p.notationFilter ? p.notationFilter : defaultNotationFilter())
+        // ✅ Get notation filter (slurs are ignored in this mode)
+        var nf = (p.notationFilter ? p.notationFilter : defaultNotationFilter());
 
-        try { console.log("[Orchestrator] NF", JSON.stringify(nf)); } catch (eNF) {}
+        // ✅ Determine source staff (slur-based detection allowed here)
+        var srcStaff = -1;
 
-        // Tracks where this run actually wrote notes: key "staff:voice:tick" -> true
-        var wroteAt = {};
+        if (curScore.spanners && curScore.spanners.length > 0) {
+            for (let s of curScore.spanners) {
+                if (!s) continue;
+                let isSlur = false;
+                try { if (s.type === Element.SLUR) isSlur = true; } catch(_) {}
+                try { if (s.type === Element.SLUR_SEGMENT) isSlur = true; } catch(_) {}
+                if (!isSlur) continue;
 
-        // Determine source (sketch) staff from the selection
-        var srcStaff = -1
+                let stf = -1;
+                try { if (s.startElement && s.startElement.staffIdx !== undefined) stf = s.startElement.staffIdx; } catch(_) {}
+                try { if (stf < 0 && s.track !== undefined) stf = Math.floor(s.track / 4); } catch(_) {}
 
-        if (curScore.selection.isRange) {
-            srcStaff = curScore.selection.startStaff
-        } else if (curScore.selection.elements && curScore.selection.elements.length) {
-            for (var ii = 0; ii < curScore.selection.elements.length; ++ii) {
-                var el = curScore.selection.elements[ii]
-                if (el && el.staffIdx !== undefined) { srcStaff = el.staffIdx; break }
-                if (el && el.parent && el.parent.staffIdx !== undefined) { srcStaff = el.parent.staffIdx; break }
+                if (stf >= 0) {
+                    srcStaff = stf;
+                    break;
+                }
             }
         }
-        if (!(srcStaff >= 0)) return
 
-        // Collect source chords (normal notes) on that staff within selection
-        var srcChords = collectSourceChordsInSelectionForStaff(srcStaff)
-        if (!srcChords.length) return
+        if (srcStaff < 0) {
+            if (curScore.selection.elements.length > 0) {
+                for (let el of curScore.selection.elements) {
+                    let ch = (el && el.parent && el.parent.staffIdx !== undefined) ? el.parent : el;
+                    if (ch && ch.staffIdx !== undefined) {
+                        srcStaff = ch.staffIdx;
+                        break;
+                    }
+                }
+            }
+        }
 
-        var pendingSlurs = queueSlursForOrchestration(p, srcStaff, srcChords);
+        if (!(srcStaff >= 0)) return;
 
+        let srcChords = collectSourceChordsInSelectionForStaff(srcStaff);
+        if (!srcChords.length) return;
 
+        // ✅ Pure note and symbol copying (no slurs)
+        curScore.startCmd(qsTr("Orchestrator apply preset (index): %1").arg(String(p.name ?? qsTr("Preset"))));
 
-
-
-        curScore.startCmd(qsTr("Orchestrator apply: %1").arg(String(p.name ?? qsTr("Preset"))))
         try {
-            for (var ci = 0; ci < srcChords.length; ++ci) {
-                var chord = srcChords[ci]
-                var frac = chord.fraction
-                var dur  = chord.actualDuration
-                var num = (dur && dur.numerator)   ? dur.numerator   : 1
-                var den = (dur && dur.denominator) ? dur.denominator : 4
+            for (let chord of srcChords) {
+                let frac = chord.fraction;
+                let dur = chord.actualDuration;
+                let num = dur?.numerator ?? 1;
+                let den = dur?.denominator ?? 4;
 
-                for (var sidKey in p.noteRowsByStaff) {
-                    if (!p.noteRowsByStaff.hasOwnProperty(sidKey)) continue
-                    var tgtStaff = parseInt(sidKey, 10)
-                    if (isNaN(tgtStaff) || tgtStaff < 0) continue
+                for (let sidKey in p.noteRowsByStaff) {
+                    if (!p.noteRowsByStaff.hasOwnProperty(sidKey)) continue;
 
-                    var rows = p.noteRowsByStaff[sidKey] || []
-                    var anyActive = false
-                    for (var ri = 0; ri < 8 && ri < rows.length; ++ri)
-                        if (rows[ri] && rows[ri].active) { anyActive = true; break }
-                    if (!anyActive) continue
+                    let tgtStaff = parseInt(sidKey, 10);
+                    if (isNaN(tgtStaff) || tgtStaff < 0) continue;
 
-                    // --- Gather desired pitches per voice at this tick ---
-                    // plus remember which dest notes are tied-forward at source
-                    var pitchesByVoice = {}
-                    var tiesByVoice = {} // voice -> array of dest pitches to tie at this tick
-                    for (var row = 0; row < 8 && row < rows.length; ++row) {
-                        var spec = rows[row]
-                        if (!spec || !spec.active) continue
-                        var srcPitch = pitchForRowFromChord(chord, row)
-                        if (srcPitch === null || srcPitch === undefined) continue
-                        var destPitch = clampInt(srcPitch + Number(spec.offset || 0), 0, 127)
-                        var voice = clampInt(Number(spec.voice || 1), 1, 4)
-                        var vKey = String(voice)
-                        if (!pitchesByVoice[vKey]) pitchesByVoice[vKey] = []
-                        if (pitchesByVoice[vKey].indexOf(destPitch) === -1)
-                            pitchesByVoice[vKey].push(destPitch)
+                    let rows = p.noteRowsByStaff[sidKey] || [];
+                    let anyActive = rows.some(r => r && r.active);
+                    if (!anyActive) continue;
 
-                        // If source has a forward tie for this srcPitch, remember to tie destination
+                    let pitchesByVoice = {};
+                    let tiesByVoice = {};
+
+                    for (let row = 0; row < rows.length && row < 8; ++row) {
+                        let spec = rows[row];
+                        if (!spec || !spec.active) continue;
+
+                        let srcPitch = pitchForRowFromChord(chord, row);
+                        if (srcPitch === null || srcPitch === undefined) continue;
+
+                        let destPitch = clampInt(srcPitch + Number(spec.offset ?? 0), 0, 127);
+                        let voice = clampInt(Number(spec.voice ?? 1), 1, 4);
+                        let vKey = String(voice);
+
+                        if (!pitchesByVoice[vKey]) pitchesByVoice[vKey] = [];
+                        if (!pitchesByVoice[vKey].includes(destPitch))
+                            pitchesByVoice[vKey].push(destPitch);
+
                         if (nf.ties && sourceHasTieForward(chord, srcPitch)) {
-                            if (!tiesByVoice[vKey]) tiesByVoice[vKey] = []
-                            if (tiesByVoice[vKey].indexOf(destPitch) === -1)
-                                tiesByVoice[vKey].push(destPitch)
+                            if (!tiesByVoice[vKey]) tiesByVoice[vKey] = [];
+                            if (!tiesByVoice[vKey].includes(destPitch))
+                                tiesByVoice[vKey].push(destPitch);
                         }
                     }
 
-                    // --- Write for each voice in one pass ---
-                    for (var vKey in pitchesByVoice) {
-                        if (!pitchesByVoice.hasOwnProperty(vKey)) continue
-                        var list = pitchesByVoice[vKey]
-                        if (!list || !list.length) continue
+                    for (let vKey in pitchesByVoice) {
+                        let voice = parseInt(vKey, 10);
+                        let list = pitchesByVoice[vKey];
 
-                        var voice = parseInt(vKey, 10)
-                        var c2 = curScore.newCursor()
-                        c2.track = tgtStaff * 4 + (voice - 1)
-                        c2.rewindToFraction(frac)
-                        c2.setDuration(num, den)
+                        let c2 = curScore.newCursor();
+                        c2.track = tgtStaff * 4 + (voice - 1);
+                        c2.rewindToFraction(frac);
+                        c2.setDuration(num, den);
 
-                        var elNow = c2.element
-                        var isChord = elNow && elNow.type === Element.CHORD
-                        var isRest  = elNow && elNow.type === Element.REST
-                        if (!elNow || (!isChord && !isRest)) {
-                            ensureWritableSlot(c2, num, den)
+                        let elNow = c2.element;
+                        if (!elNow || (elNow.type !== Element.CHORD && elNow.type !== Element.REST))
+                            ensureWritableSlot(c2, num, den);
+
+                        c2.rewindToFraction(frac);
+                        let addToChord = (c2.element && c2.element.type === Element.CHORD);
+
+                        try { c2.addNote(list[0], addToChord); } catch(_) {}
+                        for (let k = 1; k < list.length; ++k) {
+                            c2.rewindToFraction(frac);
+                            try { c2.addNote(list[k], true); } catch(_) {}
                         }
-                        c2.rewindToFraction(frac)
 
-                        var addToChord = !!(c2.element && c2.element.type === Element.CHORD)
-                        try { c2.addNote(list[0], addToChord) } catch (eAdd0) {}
-                        for (var k = 1; k < list.length; ++k) {
-                            c2.rewindToFraction(frac)
-                            try { c2.addNote(list[k], true) } catch (eAddN) {}
-                        }
-                        try {
-                            console.log("[Orchestrator] write @tick", frac.ticks, "staff", tgtStaff, "voice", voice, "pitches", list.join(","))
-                        } catch (eDbg) {}
+                        let tTick2 = frac?.ticks ?? 0;
 
-                        // Remember that we actually wrote a chord at this staff/voice/tick
-                        var tickNow = (frac && frac.ticks !== undefined) ? frac.ticks : 0;
-                        wroteAt[tgtStaff + ":" + voice + ":" + tickNow] = true;
-                    }
-
-                    // Queue ties for this tick (create after all notes are written)
-                    if (nf.ties) {
-                        var tTick = (frac && frac.ticks !== undefined) ? frac.ticks : 0
-                        for (var vKey2 in tiesByVoice) {
-                            if (!tiesByVoice.hasOwnProperty(vKey2)) continue;
-                            var vv = parseInt(vKey2, 10);
-                            if (!(vv >= 1 && vv <= 4)) continue;
-                            var plist = tiesByVoice[vKey2];
-                            for (var tt = 0; tt < plist.length; ++tt) {
-                                var dp = plist[tt]
-                                var k = tgtStaff + ":" + vv + ":" + tTick + ":" + dp
-                                if (!pendingTiesSeen[k]) {
-                                    pendingTiesSeen[k] = true
-                                    pendingTies.push({ tgtStaff: tgtStaff, voice: vv, tick: tTick, pitch: dp })
+                        if (nf.ties && tiesByVoice[vKey]) {
+                            for (let dp of tiesByVoice[vKey]) {
+                                let key = `${tgtStaff}:${voice}:${tTick2}:${dp}`;
+                                if (!pendingTiesSeen[key]) {
+                                    pendingTiesSeen[key] = true;
+                                    pendingTies.push({
+                                        tgtStaff: tgtStaff,
+                                        voice: voice,
+                                        tick: tTick2,
+                                        pitch: dp
+                                    });
                                 }
                             }
                         }
-                    }
 
-                    // Clone attached symbols at this tick (articulations/ornaments/fermatas)
-                    // CHANGED: Queue work for async post-processing instead of cloning inline.
-                    if (nf.articulations || nf.ornaments) {
-                        var tTick2 = (frac && frac.ticks !== undefined) ? frac.ticks : 0;
-                        try {
-                            console.log("[Orchestrator] symbols phase @tick", tTick2, "dstStaff", tgtStaff,
-                                        "voices", Object.keys(pitchesByVoice).join(","));
-                        } catch (eDbgS) {}
+                        // ✅ Symbol copying preserved
+                        if (nf.articulations || nf.ornaments) {
+                            let queuedSymbolKeys = {};
 
-                        // ------------------------------------------------------------
-                        // DEDUPE SET for this (tgtStaff, voice, tick) batch.
-                        // Keys are: type + "|" + subtype + "|" + pitch?
-                        // ------------------------------------------------------------
-                        var queuedSymbolKeys = {};
-
-                        // For each destination voice we produced, queue chord- and note-attached items
-                        for (var vKey3 in pitchesByVoice) {
-                            if (!pitchesByVoice.hasOwnProperty(vKey3)) continue;
-                            var vvv = parseInt(vKey3, 10);
-                            if (!(vvv >= 1 && vvv <= 4)) continue;
-
-                            // Avoid duplicating on the source staff: only queue symbols for *other* staves
-                            if (tgtStaff === srcStaff) {
-                                continue;
-                            }
-
-                            // Queue chord-level items
                             if (chord) {
                                 if (nf.articulations && chord.articulations) {
-                                    for (var ai = 0; ai < chord.articulations.length; ++ai) {
-                                        var a = chord.articulations[ai];
+                                    for (let a of chord.articulations) {
                                         if (!a) continue;
-
                                         let sub = "";
                                         try { sub = a.subtypeName ? String(a.subtypeName()) : ""; } catch(_) {}
-
-                                        var key = a.type + "|" + sub + "|chord";
+                                        let key = `${a.type}\n${sub}\nchord`;
                                         if (!queuedSymbolKeys[key]) {
                                             queuedSymbolKeys[key] = true;
-                                            pendingSymbols.push({ kind: 'chord', tgtStaff: tgtStaff, voice: vvv, tick: tTick2, src: a, srcStaff: srcStaff });
+                                            pendingSymbols.push({
+                                                kind: 'chord',
+                                                tgtStaff: tgtStaff,
+                                                voice: voice,
+                                                tick: tTick2,
+                                                src: a,
+                                                srcStaff: srcStaff
+                                            });
                                         }
-                                    }
-                                }
-                                if (chord.elements && (nf.ornaments || nf.articulations)) {
-                                    for (var ce = 0; ce < chord.elements.length; ++ce) {
-                                        var elc = chord.elements[ce];
-                                        if (!elc) continue;
-
-                                        var allowed =
-                                                (elc.type === Element.ORNAMENT && nf.ornaments) ||
-                                                (elc.type === Element.FERMATA && nf.articulations);
-
-                                        if (!allowed) continue;
-
-                                        let sub = "";
-                                        try { sub = elc.subtypeName ? String(elc.subtypeName()) : ""; } catch(_) {}
-
-                                        var key = elc.type + "|" + sub + "|chord";
-                                        if (!queuedSymbolKeys[key]) {
-                                            queuedSymbolKeys[key] = true;
-                                            pendingSymbols.push({ kind: 'chord', tgtStaff: tgtStaff, voice: vvv, tick: tTick2, src: elc, srcStaff: srcStaff });
-                                        }
-                                    }
-                                }
-
-                                // Queue note-level items (only for rows mapped to this voice)
-                                if ((nf.articulations || nf.ornaments) && chord.notes) {
-                                    for (var ri = 0; ri < rows.length && ri < 8; ++ri) {
-                                        var rr = rows[ri]; if (!rr || !rr.active) continue;
-                                        if (vvv !== clampInt(Number(rr.voice || 1), 1, 4)) continue;
-                                        var srcP = pitchForRowFromChord(chord, ri);
-                                        if (srcP === null || srcP === undefined) continue;
-                                        var dstP = clampInt(srcP + Number(rr.offset || 0), 0, 127);
-
-                                        // Find the matching source note at srcP to read its elements
-                                        var srcNote = null;
-                                        for (var si = 0; si < chord.notes.length; ++si) {
-                                            var nn = chord.notes[si];
-                                            if (nn && nn.pitch === srcP) { srcNote = nn; break; }
-                                        }
-
-                                        try {
-                                            var _dbgCnt = (srcNote && srcNote.elements ? srcNote.elements.length : 0)
-                                                    + (srcNote && srcNote.articulations ? srcNote.articulations.length : 0);
-                                            if (_dbgCnt > 0)
-                                                console.log("[Orchestrator] note-level symbols @tick", tTick2, "srcPitch", srcP, "-> dst", dstP, "count", _dbgCnt);
-                                        } catch (_eDbg) {}
-
-
-                                        // 2b.1) Items exposed via srcNote.elements
-                                        if (srcNote && srcNote.elements) {
-                                            for (var ne = 0; ne < srcNote.elements.length; ++ne) {
-                                                var eln = srcNote.elements[ne];
-                                                if (!eln) continue;
-
-                                                var allowed =
-                                                        (eln.type === Element.ARTICULATION) ||
-                                                        (eln.type === Element.FERMATA) ||
-                                                        (nf.ornaments && eln.type === Element.ORNAMENT);
-
-                                                if (!allowed) continue;
-
-                                                let sub = "";
-                                                try { sub = eln.subtypeName ? String(eln.subtypeName()) : ""; } catch(_) {}
-
-                                                var key = eln.type + "|" + sub + "|note|" + dstP;
-                                                if (!queuedSymbolKeys[key]) {
-                                                    queuedSymbolKeys[key] = true;
-                                                    pendingSymbols.push({ kind: 'note', tgtStaff: tgtStaff, voice: vvv, tick: tTick2, pitch: dstP, src: eln, srcStaff: srcStaff });
-                                                }
-                                            }
-                                        }
-                                        // 2b.2) Items exposed via srcNote.articulations (MU 4.x commonly uses this for accents/staccato)
-                                        if (srcNote && srcNote.articulations) {
-                                            for (var na = 0; na < srcNote.articulations.length; ++na) {
-                                                var ar = srcNote.articulations[na];
-                                                if (!ar) continue;
-
-                                                let sub = "";
-                                                try { sub = ar.subtypeName ? String(ar.subtypeName()) : ""; } catch (_) {}
-
-                                                // Unique key per symbol type + subtype + pitch
-                                                let key = ar.type + "|" + sub + "|note|" + dstP;
-                                                if (!queuedSymbolKeys[key]) {
-                                                    queuedSymbolKeys[key] = true;
-                                                    pendingSymbols.push({
-                                                                            kind: 'note',
-                                                                            tgtStaff: tgtStaff,
-                                                                            voice: vvv,
-                                                                            tick: tTick2,
-                                                                            pitch: dstP,
-                                                                            src: ar,
-                                                                            srcStaff: srcStaff
-                                                                        });
-                                                }
-                                            }
-                                        }
-
-
                                     }
                                 }
                             }
@@ -2205,9 +2533,8 @@ MuseScore {
                     }
                 }
             }
-
-        } catch (e) {
-            // Minimal failure path: rollback and log
+        }
+        catch(e) {
             curScore.endCmd(true);
             console.log("[Orchestrator] ERROR:", String(e));
             return;
@@ -2215,28 +2542,20 @@ MuseScore {
 
         curScore.endCmd();
 
-        // NEW: Post-commit slurs (async batches)
-        if (nf.slurs && pendingSlurs.length > 0) {
-            processPendingSlursAsync(pendingSlurs, 0);
-        }
-
-        // --- Post-commit ties (run outside the big write command) ---
         if (nf.ties && pendingTies.length > 0) {
-            for (var ti = 0; ti < pendingTies.length; ++ti) {
-                var T = pendingTies[ti];
-                var nStart = findNoteAt(T.tgtStaff, T.voice, T.tick, T.pitch);
+            for (let T of pendingTies) {
+                let nStart = findNoteAt(T.tgtStaff, T.voice, T.tick, T.pitch);
                 if (!nStart) continue;
-                try { if (nStart.tieForward) continue; } catch (eTF) {}
-                withSingleSelection(nStart, "chord-tie"); // creates tie to next same‑pitch note
+                try { if (nStart.tieForward) continue; } catch(_) {}
+                withSingleSelection(nStart, "chord-tie");
             }
         }
 
-        // NEW: Post-commit articulations/ornaments/fermatas (async batches)
         if ((nf.articulations || nf.ornaments) && pendingSymbols.length > 0) {
-            try { console.log("[Orchestrator] pendingSymbols:", pendingSymbols.length); } catch (eLog) {}
             processPendingSymbolsAsync(pendingSymbols, 0);
         }
     }
+
 
     // Model: { idx, name }
     ListModel { id: staffListModel }
@@ -3000,30 +3319,40 @@ MuseScore {
                                         anchors.fill: parent
                                         enabled: root.enabled
                                         hoverEnabled: true
-
                                         // Allow child controls (e.g., TextInput) to receive the actual click
                                         propagateComposedEvents: true
 
-                                        onPressed: function(mouse) {
-                                            // Only select cards when settings panel is open
+                                        // 1) SETTINGS MODE: keep editing behavior (select card, no execution)
+                                        onPressed: function (mouse) {
                                             if (root.settingsOpen) {
-                                                rootUI.selectedIndex = model.index
+                                                rootUI.selectedIndex = model.index;     // select for editing
                                             }
-                                            ui.tooltip.hide(root, true)
+                                            ui.tooltip.hide(root, true);
+                                        }
+
+                                        // 2) NORMAL MODE: execute preset with slur-aware flow, without persisting selection
+                                        onClicked: {
+                                            if (!root.settingsOpen) {
+                                                // Temporarily select this card so applyCurrentPresetToSelection() uses it
+                                                var prevSel = rootUI.selectedIndex;
+                                                var prevSuppress = root.suppressApplyPreset;
+
+                                                root.suppressApplyPreset = true;        // avoid UI side-effects while flipping selection
+                                                rootUI.selectedIndex = model.index;
+                                                root.suppressApplyPreset = prevSuppress;
+
+                                                // Slur-aware engine (builds StartMap BEFORE note-writing)
+                                                root.applyCurrentPresetToSelection();
+
+                                                // Restore "no persistent selection" (same UX as your original code)
+                                                rootUI.selectedIndex = -1;
+                                                return;
+                                            }
+
+                                            // If settingsOpen, do nothing here; onPressed already selected the card for editing.
                                         }
 
                                         preventStealing: true
-
-                                        onClicked: {
-                                            // Normal mode: fire this preset immediately on current selection
-                                            if (!root.settingsOpen) {
-                                                root.applyPresetIndexToSelection(model.index)
-                                                // trigger-only, no selection persistence
-                                                rootUI.selectedIndex = -1
-                                                return
-                                            }
-                                            // Settings-open behavior remains selection of the card (handled in onPressed)
-                                        }
                                     }
                                 }
                             }
