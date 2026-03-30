@@ -27,7 +27,7 @@ MuseScore {
     description: qsTr("Quickly orchestrate sketches")
     thumbnailName: "orchestrator.png"
     title: qsTr("Orchestrator")
-    version: "0.1.3"
+    version: "0.1.4"
 
 
     // Sprint 1: window base width and settings panel animation
@@ -43,6 +43,14 @@ MuseScore {
     property int lastAnchorIndex: -1
     property int currentStaffIdx: -1
     property bool liveCommitEnabled: true
+
+    // Dynamic engine function exports
+    property var dynamicAPI: ({
+                                  detectDynamics: null,
+                                  createDynamic: null,
+                                  createHairpin: null,
+                                  addDynamicByBeat: null
+                              })
 
     // Theme convenience
     readonly property color themeAccent: ui.theme.accentColor
@@ -846,41 +854,62 @@ MuseScore {
 
     // Collect normal-note CHORDs on a specific source staff inside current selection window
     function collectSourceChordsInSelectionForStaff(srcStaffIdx) {
-        var chords = []
-        if (!curScore || !curScore.selection) return chords
+        var chords = [];
+        if (!curScore || !curScore.selection)
+            return chords;
 
+        // Range selection
         if (curScore.selection.isRange) {
-            var startTick = curScore.selection.startSegment.tick
-            var endTick = curScore.selection.endSegment ? curScore.selection.endSegment.tick : (curScore.lastSegment ? curScore.lastSegment.tick + 1 : startTick)
-            var c = curScore.newCursor()
-            c.track = srcStaffIdx * 4
-            c.rewindToTick(startTick)
+            // ✅ Convert Segment.tick (Segment object in MS4.7) → numeric ticks
+            var startTick = fractionToTicks(curScore.selection.startSegment.tick);
+            var endTick = curScore.selection.endSegment
+                    ? fractionToTicks(curScore.selection.endSegment.tick)
+                    : (
+                          curScore.lastSegment
+                          ? fractionToTicks(curScore.lastSegment.tick) + 1
+                          : startTick
+                          );
+
+            var c = curScore.newCursor();
+            c.track = srcStaffIdx * 4;
+            c.rewindToTick(startTick);
+
             while (c.segment && c.tick < endTick) {
-                var el = c.element
+                var el = c.element;
                 if (el && el.type === Element.CHORD && el.noteType === NoteType.NORMAL)
-                    chords.push(el)
-                if (!c.next()) break
+                    chords.push(el);
+                if (!c.next())
+                    break;
             }
-        } else {
-            // list selection: filter to the same staff as the first chord/note
-            for (var i = 0; i < curScore.selection.elements.length; ++i) {
-                var el = curScore.selection.elements[i]
-                var ch = null
-                if (el && el.type === Element.NOTE && el.parent && el.parent.type === Element.CHORD) ch = el.parent
-                else if (el && el.type === Element.CHORD) ch = el
-                if (!ch) continue
-                if (ch.noteType !== NoteType.NORMAL) continue
-                if (ch.staffIdx === srcStaffIdx) chords.push(ch)
-            }
-            // sort by time, then by track (voice) to keep deterministic order
-            chords.sort(function(a, b) {
-                if (a.fraction.lessThan(b.fraction)) return -1
-                if (a.fraction.greaterThan(b.fraction)) return 1
-                return a.track - b.track
-            })
         }
-        return chords
-    } // [1](https://stlukes-my.sharepoint.com/personal/ewarren_slhs_org/Documents/Microsoft%20Copilot%20Chat%20Files/keyswitch_creator.txt)
+
+        // List selection
+        else {
+            for (var i = 0; i < curScore.selection.elements.length; ++i) {
+                var el = curScore.selection.elements[i];
+                var ch = null;
+
+                if (el && el.type === Element.NOTE && el.parent && el.parent.type === Element.CHORD)
+                    ch = el.parent;
+                else if (el && el.type === Element.CHORD)
+                    ch = el;
+
+                if (!ch) continue;
+                if (ch.noteType !== NoteType.NORMAL) continue;
+                if (ch.staffIdx === srcStaffIdx)
+                    chords.push(ch);
+            }
+
+            // deterministic order
+            chords.sort(function(a, b) {
+                if (a.fraction.lessThan(b.fraction)) return -1;
+                if (a.fraction.greaterThan(b.fraction)) return 1;
+                return a.track - b.track;
+            });
+        }
+
+        return chords;
+    }
 
     // Quick check: do we have a selected preset with any active rows in any staff?
     function canApplyToSelection() {
@@ -902,8 +931,8 @@ MuseScore {
         // in the currently selected preset. The source staff is irrelevant.
         const uiRef = orchestratorWin ? orchestratorWin.rootUIRef : null;
         if (!uiRef ||
-            uiRef.selectedIndex < 0 ||
-            uiRef.selectedIndex >= presets.length)
+                uiRef.selectedIndex < 0 ||
+                uiRef.selectedIndex >= presets.length)
         {
             return [];
         }
@@ -927,9 +956,9 @@ MuseScore {
                 if (!r || !r.active) continue;
 
                 out.push({
-                    dstStaff: parseInt(sid, 10),
-                    voice: clampInt(Number(r.voice || 1), 1, 4)
-                });
+                             dstStaff: parseInt(sid, 10),
+                             voice: clampInt(Number(r.voice || 1), 1, 4)
+                         });
             }
         }
 
@@ -1019,11 +1048,20 @@ MuseScore {
         let pendingTies = [];
         let pendingTiesSeen = {};
         let pendingSymbols = [];
+        let pendingDynamics = [];
+        let pendingHairpins = [];
 
         // ------------------------------------------------------------------------
         // WRITE PASS (notes + queue ties + queue symbols)
         // ------------------------------------------------------------------------
         curScore.startCmd(qsTr("Orchestrator apply: %1").arg(String(p.name ?? qsTr("Preset"))));
+
+        // Cache a single detectDynamics() snapshot for this whole apply pass
+        const dsetAll = detectDynamics(curScore);
+        try {
+            console.log("[DYNDBG] cached detectDynamics: dynamics=", dsetAll.dynamics.length,
+                        "hairpins=", dsetAll.hairpins.length);
+        } catch (_) {}
 
         try {
             for (var ci = 0; ci < srcChords.length; ++ci) {
@@ -1116,11 +1154,93 @@ MuseScore {
                                 if (!pendingTiesSeen[key]) {
                                     pendingTiesSeen[key] = true;
                                     pendingTies.push({
-                                        tgtStaff: tgtStaff,
-                                        voice: voice,
-                                        tick: tTick2,
-                                        pitch: dp
-                                    });
+                                                         tgtStaff: tgtStaff,
+                                                         voice: voice,
+                                                         tick: tTick2,
+                                                         pitch: dp
+                                                     });
+                                }
+                            }
+                        }
+
+                        if (nf.dynamics) {
+                            const srcFrac = chord.fraction;
+                            const srcTickInt = srcFrac?.ticks ?? 0;
+                            const dset = dsetAll;  // or the cached dsetAll
+
+                            // Log the intent clearly: we search dynamics on the SOURCE staff at this tick
+                            try {
+                                console.log("[DYNDBG] searching dynamics at tick", srcTickInt, "on srcStaff", srcStaff);
+                            } catch (e) {}
+
+                            let matched = 0;
+                            for (let d of dset.dynamics) {
+                                const sameStaff = (d.staffIdx === srcStaff);            // <— filter by source staff
+                                const sameTick  = (d.tickInt === srcTickInt);           // (or use ±1 tolerance if needed)
+
+                                if (sameStaff && sameTick) {
+                                    matched++;
+                                    pendingDynamics.push({
+                                                             tgtStaff: tgtStaff,
+                                                             voice: voice,
+                                                             tick: srcTickInt,
+                                                             text: d.text,
+                                                             type: d.type,
+                                                             kind: d.kind,
+                                                             elementType: d.elementType,
+                                                             subStyle: d.subStyle,
+                                                             placement: d.placement,
+                                                             srcElement: d.element,
+                                                             srcStaffIdx: d.staffIdx,
+                                                             srcTickInt: srcTickInt,
+                                                             dynTickInt: d.tickInt
+                                                         });
+                                }
+
+                                try {
+                                    console.log("[DYNDBG] compare staff", d.staffIdx, "vs src", srcStaff,
+                                                "ticks", d.tickInt, "vs", srcTickInt,
+                                                "=>", (sameStaff && sameTick));
+                                } catch (e) {}
+                            }
+
+                            try {
+                                console.log("[DYNDBG] matched", matched, "dynamic(s) at srcTick", srcTickInt,
+                                            "FROM srcStaff", srcStaff, "TO tgtStaff", tgtStaff, "voice", voice);
+                            } catch (e) {}
+                        }
+
+                        // try {
+                        //   for (let d of pendingDynamics)
+                        //     debugListDynamicsAt(curScore, d.tgtStaff, d.srcTickInt);
+                        // } catch(_){}
+
+                        // ✅ HAIRPINS — 4.7‑safe tick handling
+                        if (nf.hairpins) {
+                            let srcTick = chord.fraction?.ticks ?? 0;
+                            let dset = dsetAll;
+
+                            function toIntTick(v) {
+                                try {
+                                    if (v === undefined || v === null) return undefined;
+                                    if (typeof v === "number") return v;
+                                    if (v.ticks !== undefined) return parseInt(v.ticks, 10);
+                                    return fractionToTicks(v);
+                                } catch (e) { return undefined; }
+                            }
+
+                            for (let hp of dset.hairpins) {
+                                let st = toIntTick(hp.startTick);
+                                let en = toIntTick(hp.endTick);
+                                if (st === undefined || en === undefined) continue;
+                                if (srcTick >= st && srcTick <= en) {
+                                    pendingHairpins.push({
+                                                             tgtStaff: tgtStaff,
+                                                             voice: voice,
+                                                             startTick: hp.startTick,
+                                                             endTick: hp.endTick,
+                                                             type: hp.type
+                                                         });
                                 }
                             }
                         }
@@ -1139,13 +1259,13 @@ MuseScore {
                                         if (!queuedSymbolKeys[key]) {
                                             queuedSymbolKeys[key] = true;
                                             pendingSymbols.push({
-                                                kind: 'chord',
-                                                tgtStaff: tgtStaff,
-                                                voice: voice,
-                                                tick: tTick2,
-                                                src: a,
-                                                srcStaff: srcStaff
-                                            });
+                                                                    kind: 'chord',
+                                                                    tgtStaff: tgtStaff,
+                                                                    voice: voice,
+                                                                    tick: tTick2,
+                                                                    src: a,
+                                                                    srcStaff: srcStaff
+                                                                });
                                         }
                                     }
                                 }
@@ -1172,6 +1292,45 @@ MuseScore {
             processPendingSlursAsync(pendingSlurs);
         }
 
+        // ✅ DYNAMICS — symmetric creation (mirror source representation)
+        if (nf.dynamics && pendingDynamics.length > 0) {
+            curScore.startCmd(qsTr("Orchestrator: add dynamics"));
+            try { console.log("[DYNDBG] creating", pendingDynamics.length, "dynamic(s)"); } catch (e) {}
+            let okCount = 0;
+            for (let d of pendingDynamics) {
+                try {
+                    console.log("[DYNDBG] createDynamic (symmetric)",
+                                "tgtStaff=", d.tgtStaff, "voice=", d.voice,
+                                "srcTickInt=", d.srcTickInt, "dynTickInt=", d.dynTickInt,
+                                "kind=", d.kind, "eltType=", d.elementType,
+                                "text=", String(d.text), "type=", d.type, "subStyle=", d.subStyle);
+                } catch (e) {}
+                let res = null;
+                try {
+                    res = createDynamicSymmetric(curScore, d.tgtStaff, d.tick, d);
+                } catch(eDyn) {
+                    try { console.log("[DYNDBG] createDynamicSymmetric error:", String(eDyn)); } catch(e2){}
+                }
+                if (res) {
+                    okCount++;
+                    try { console.log("[DYNDBG] ✅ createDynamicSymmetric -> ok (staff", d.tgtStaff, "voice", d.voice, ")"); } catch(_) {}
+                } else {
+                    try { console.log("[DYNDBG] ⚠️ createDynamicSymmetric -> null (staff", d.tgtStaff, "voice", d.voice, ")"); } catch(_) {}
+                }
+            }
+            try { console.log("[DYNDBG] add dynamics complete; created:", okCount, "of", pendingDynamics.length); } catch(_) {}
+            curScore.endCmd();
+        }
+
+        // ✅ HAIRPINS
+        if (nf.hairpins && pendingHairpins.length > 0) {
+            curScore.startCmd(qsTr("Orchestrator: add hairpins"));
+            for (let h of pendingHairpins) {
+                try { dynamicAPI.createHairpin(curScore, h.tgtStaff, h.startTick, h.endTick, h.type); } catch(eHp) {}
+            }
+            curScore.endCmd();
+        }
+
         // ✅ TIES
         if (nf.ties && pendingTies.length > 0) {
             processPendingTiesAsync(pendingTies, 0);
@@ -1181,6 +1340,429 @@ MuseScore {
         if ((nf.articulations || nf.ornaments) && pendingSymbols.length > 0) {
             processPendingSymbolsAsync(pendingSymbols, 0);
         }
+    }
+
+    // ======================================================================
+    //  DYNAMIC DETECTION + CREATION ENGINE  (Top-level global helpers)
+    //  Integrated for Orchestrator (Dynamics + Hairpins)
+    // ======================================================================
+
+    // Detect all dynamics & hairpins in the score. (Keep your function signature/logging)
+    function detectDynamics(score) {
+        if (!score)
+            return { dynamics: [], hairpins: [] };
+
+        if (typeof detectDynamics.__loggedOnce === "undefined")
+            detectDynamics.__loggedOnce = false;
+
+        const dynamics = [];
+        const hairpins = [];
+
+        // Sample up to 5 text elements that did NOT qualify as dynamics (for diagnostics)
+        let __sampledText = 0;
+
+        // ----- DYNAMICS (glyph + styled text + token fallback) -----
+        let seg = score.firstSegment();
+        let __segCount = 0; // NEW: count segments we scanned
+
+        while (seg) {
+            __segCount++;
+
+            let raw = seg.tick;
+            let tInt = fractionToTicks(raw);
+
+            // --- Path A: Prefer annotations array when available (4.7-safe) ---
+            let handledViaAnnotations = false;
+            try {
+                if (seg.annotations && seg.annotations.length !== undefined) {
+                    handledViaAnnotations = true;
+                    for (let ai = 0; ai < seg.annotations.length; ++ai) {
+                        const el = seg.annotations[ai];
+                        if (!el) continue;
+
+                        // Case A: glyph dynamics
+                        if (el.type === Element.DYNAMIC) {
+                            dynamics.push({
+                                              kind: "glyph",
+                                              elementType: Element.DYNAMIC,
+                                              type: (function(){ try { return el.dynamicType; } catch(_) { return undefined; } })(),
+                                              text: (function(){ try { return el.plainText; } catch(_) { return ""; } })(),
+                                              tick: raw,
+                                              tickInt: tInt,
+                                              staffIdx: (function(){ try { return Math.floor(el.track / 4); } catch(_) { return -1; } })(),
+                                              voice: (function(){ try { return el.track % 4; } catch(_) { return 0; } })(),
+                                              element: el,
+                                              segment: seg,
+                                              offset: (function(){ try { return el.offset; } catch(_) { return undefined; } })(),
+                                              placement: (function(){ try { return el.placement; } catch(_) { return undefined; } })()
+                                          });
+                            continue;
+                        }
+
+                        // Case B: StaffText / Expression used as dynamics
+                        let isStaffText = false, isExpression = false;
+                        try { isStaffText = (typeof Element.STAFF_TEXT !== "undefined" && el.type === Element.STAFF_TEXT); } catch(_) {}
+                        try { isExpression = (typeof Element.EXPRESSION !== "undefined" && el.type === Element.EXPRESSION); } catch(_) {}
+
+                        if (!isStaffText && !isExpression)
+                            continue;
+
+                        let rawTxt = "";
+                        try { rawTxt = String(el.plainText ?? el.text ?? ""); } catch(_) {}
+
+                        // Style-based recognition first
+                        let isDynStyle = false, subStyleVal = undefined;
+                        try {
+                            if (typeof Tid !== "undefined" && typeof el.subStyle !== "undefined") {
+                                subStyleVal = el.subStyle;
+                                isDynStyle = (subStyleVal === Tid.DYNAMICS);
+                            }
+                        } catch(_) {}
+
+                        // Fallback: token mapping ("p", "mf", "ff", …)
+                        let mappedType = mapDynamicTextToType(rawTxt);
+
+                        // Diagnostics: sample a few non-detected text items
+                        if ((isStaffText || isExpression) && !isDynStyle && mappedType === undefined && __sampledText < 5) {
+                            __sampledText++;
+                            try {
+                                console.log("[DYNDBG] sample text@tick", tInt,
+                                            "elt", (isStaffText ? "STAFF_TEXT" : "EXPRESSION"),
+                                            "subStyle=", (typeof el.subStyle !== "undefined" ? el.subStyle : "(n/a)"),
+                                            "plainText=", String(rawTxt));
+                            } catch (_) {}
+                        }
+
+                        if (isDynStyle || mappedType !== undefined) {
+                            dynamics.push({
+                                              kind: "text",
+                                              elementType: isStaffText ? Element.STAFF_TEXT : Element.EXPRESSION,
+                                              subStyle: (isDynStyle ? subStyleVal : undefined),
+                                              text: rawTxt,
+                                              type: mappedType,               // may be undefined if token unrecognized
+                                              tick: raw,
+                                              tickInt: tInt,
+                                              staffIdx: (function(){ try { return Math.floor(el.track / 4); } catch(_) { return -1; } })(),
+                                              voice: (function(){ try { return el.track % 4; } catch(_) { return 0; } })(),
+                                              element: el,
+                                              segment: seg,
+                                              placement: (function(){ try { return el.placement; } catch(_) { return undefined; } })()
+                                          });
+                        }
+                    }
+                }
+            } catch(_) {}
+
+            // --- Path B: Fallback to elementAt(track) scan when annotations are absent ---
+            if (!handledViaAnnotations) {
+                for (let track = 0; track < score.ntracks; ++track) {
+                    const el = seg.elementAt(track);
+                    if (!el) continue;
+
+                    // (the existing glyph / text cases unchanged)
+                    // ... (reuse your current logic here) ...
+                }
+            }
+
+            // Advance across the whole score in time order (4.7-safe)
+            seg = (typeof seg.nextInScore !== "undefined" && seg.nextInScore)
+                    ? seg.nextInScore
+                    : (typeof seg.next !== "undefined" ? seg.next : null);
+        }
+
+        // Emit a reliable segment scan count
+        try { console.log("[DYNDBG] segment scan count:", __segCount); } catch(e){}
+
+        // ----- HAIRPINS (unchanged from your code) -----
+        const sp = score.spanners;
+        for (let i = 0; i < sp.length; ++i) {
+            const s = sp[i];
+            if (s && s.type === Element.HAIRPIN) {
+                hairpins.push({
+                                  type: s.hairpinType,
+                                  startTick: s.startTick,
+                                  endTick: s.endTick,
+                                  element: s
+                              });
+            }
+        }
+
+        if (!detectDynamics.__loggedOnce) {
+            try {
+                console.log("[DYNDBG] detectDynamics summary: dynamics=", dynamics.length, "hairpins=", hairpins.length);
+                let cap = Math.min(8, dynamics.length);
+                for (let i = 0; i < cap; ++i) {
+                    let d = dynamics[i];
+                    console.log("[DYNDBG] DET dyn[", i, "] kind=", d.kind,
+                                "tickInt=", d.tickInt, "staffIdx=", d.staffIdx, "voice=", d.voice,
+                                "type=", d.type, "text=", String(d.text), "eltType=", d.elementType, "subStyle=", d.subStyle);
+                }
+            } catch (e) {}
+            detectDynamics.__loggedOnce = true;
+        }
+
+        return { dynamics, hairpins };
+    }
+
+    // [DYN-SYM] Text token → DynamicType map (best-effort)
+    function mapDynamicTextToType(rawText) {
+        if (!rawText) return undefined;
+        var t = String(rawText).replace(/\s+/g, "").toLowerCase();
+
+        // Canonical tokens
+        var map = {
+            "pppppp":"PPPPPP","ppppp":"PPPPP","pppp":"PPPP","ppp":"PPP","pp":"PP","p":"P",
+            "mp":"MP","mf":"MF",
+            "f":"F","ff":"FF","fff":"FFF","ffff":"FFFF","fffff":"FFFFF","ffffff":"FFFFFF",
+            "fp":"FP","pf":"PF",
+            "sf":"SF","sfz":"SFZ","sff":"SFF","sffz":"SFFZ","sfff":"SFFF","sfffz":"SFFFZ",
+            "sfp":"SFP","sfpp":"SFPP","rfz":"RFZ","rf":"RF","fz":"FZ","z":"Z","n":"N"
+        };
+        var key = map[t];
+        if (!key) return undefined;
+
+        // Return numeric enum if available
+        try {
+            return DynamicType[key];
+        } catch (_) {
+            return undefined;
+        }
+    }
+
+    // Create a simple dynamic (“p”, “mf”, “ff”…) — instrumentation only
+    function createDynamic(score, staffIdx, tick, text) {
+        if (!score) return null;
+        const c = score.newCursor();
+
+        // Dynamics usually go on voice 1; use track = staffIdx*4 + 0
+        c.track = staffIdx * 4 + 0;
+
+        try {
+            let kind = (typeof tick === "number") ? "absTick" :
+                                                    (tick && tick.ticks !== undefined) ? "Fraction(ticks="+tick.ticks+")" :
+                                                                                         "UnknownTick";
+            console.log("[DYNDBG] createDynamic rewind", kind, "-> staffIdx", staffIdx, "text", String(text));
+        } catch (e) {}
+
+        try { c.rewindToFraction(tick); } catch (eRF) {
+            try { console.log("[DYNDBG] rewindToFraction failed; error:", String(eRF)); } catch(e2){}
+        }
+
+        const d = newElement(Element.DYNAMIC);
+        if (!d) return null;
+        d.plainText = text;
+
+        try {
+            c.add(d);
+            console.log("[DYNDBG] dynamic added at staffIdx", staffIdx, "with text", String(text));
+        } catch (eAdd) {
+            try { console.log("[DYNDBG] add dynamic failed:", String(eAdd)); } catch(e2){}
+            return null;
+        }
+        return d;
+    }
+
+    // [DYN-SYM] Create dynamic using the same representation we detected
+    function createDynamicSymmetric(score, staffIdx, tick, d) {
+        if (!score || !d) return null;
+
+        // --- ENTER LOG ---
+        try {
+            var tinfo = (tick && tick.ticks !== undefined) ? tick.ticks : tick;
+            console.log("[DYNDBG] >> enter createDynamicSymmetric",
+                        "staff=", staffIdx, "tick=", tinfo,
+                        "kind=", d.kind, "type=", d.type, "text=", String(d.text));
+        } catch(_) {}
+
+        // Common cursor positioning & logging
+        const c = score.newCursor();
+
+        // Choose a destination voice track. Dynamics aren’t voice-specific,
+        // but the cursor needs a concrete track. Default to voice 1 (index 0).
+        let vIndex = 0;
+        try {
+            if (d && d.voice !== undefined && d.voice !== null) {
+                // d.voice is 1..4 from your orchestration row; clamp to 0..3
+                const vv = Math.max(1, Math.min(4, parseInt(d.voice, 10) || 1));
+                vIndex = vv - 1;
+            }
+        } catch (_) { vIndex = 0; }
+
+        // IMPORTANT: set track first, then position; this mirrors your note-writing code.
+        c.track = staffIdx * 4 + vIndex;
+        // Convert anything → absolute tick and rewind by tick for this build
+        function toIntTick(v) {
+            try {
+                if (typeof v === "number") return v;
+                if (v && v.ticks !== undefined) return parseInt(v.ticks, 10);
+                return fractionToTicks(v);
+            } catch(_) { return 0; }
+        }
+        const tInt = toIntTick(tick);
+        try { c.rewindToTick(tInt); } catch (eRF) {
+            try { console.log("[DYNDBG] rewindToFraction failed; error:", String(eRF)); } catch(e2){}
+        }
+
+        // Diagnostics: where did the cursor actually land?
+        try { console.log("[DYNDBG] cursor at tick:", c.tick, "expected:", tInt, "track:", c.track); } catch(_){}
+
+        // -------- De-dupe on this segment: skip if a dynamic already exists --------
+        try {
+            const seg = c.segment;    if (seg && seg.annotations) {
+                for (let i = 0; i < seg.annotations.length; ++i) {
+                    const el = seg.annotations[i];
+                    if (el && el.type === Element.DYNAMIC && Math.floor((el.track||0)/4) === staffIdx) {
+                        console.log("[DYNDBG] existing dynamic at tick", tInt, "staff", staffIdx, "→ skip add");
+                        return el; // treat as success
+                    }
+                }
+            }
+        } catch(_) {}
+
+        // -------- Path A (robust): clone the source element when available --------
+        if (d.srcElement) {
+
+            try {
+
+                let copy = null;
+                try { copy = d.srcElement.clone(); } catch(_) { copy = null; }
+                if (copy) {
+
+                    // normalize a few properties for safety
+                    try { if (typeof copy.visible !== "undefined") copy.visible = true; } catch(_){}
+                    try { if (typeof copy.autoplace !== "undefined") copy.autoplace = true; } catch(_){}
+                    try { if (typeof d.placement !== "undefined" && typeof copy.placement !== "undefined") copy.placement = d.placement; } catch(_){}
+                    c.add(copy);
+                    console.log("[DYNDBG] ++ added CLONED dynamic staff=", staffIdx, "track=", c.track, "tick=", tInt);
+                    return copy;
+                }
+            } catch(eClone) {
+                try { console.log("[DYNDBG] clone-add dynamic failed:", String(eClone)); } catch(_){}
+            }
+        }
+
+        // -------- Path B: create new (fallback) --------
+        if (d.kind === "glyph" || (d.kind === "text" && d.type !== undefined && d.elementType === Element.DYNAMIC)) {
+            const dyn = newElement(Element.DYNAMIC);
+            if (!dyn) return null;
+            let setTypeOk = false;
+            try { if (d.type !== undefined && d.type !== null) { dyn.dynamicType = d.type; setTypeOk = true; } } catch(_) {}
+            try { if (!setTypeOk && d.text) dyn.plainText = d.text; } catch(_) {}
+            try { if (typeof dyn.visible !== "undefined") dyn.visible = true; } catch(_){}
+            try { if (typeof dyn.autoplace !== "undefined") dyn.autoplace = true; } catch(_){}
+            try { if (typeof d.placement !== "undefined" && typeof dyn.placement !== "undefined") dyn.placement = d.placement; } catch(_){}
+            try { c.add(dyn); } catch(eAdd) { try { console.log("[DYNDBG] add dynamic failed:", String(eAdd)); } catch(e2){}; return null; }
+            try {
+                console.log("[DYNDBG] ++ added glyph dynamic","staff=", staffIdx, "track=", c.track, "tick=", tInt,
+                            "type=", (function(){ try { return dyn.dynamicType; } catch(_){ return "(?)"; } })());
+            } catch(_) {}
+            return dyn;
+        }
+
+        // Case B: text dynamic (mirror original element type, keep style if we have it)
+        if (d.kind === "text") {
+            // Default to Staff Text when in doubt
+            const et = (d.elementType === Element.EXPRESSION) ? Element.EXPRESSION : Element.STAFF_TEXT;
+            const t = newElement(et);
+            if (!t) return null;
+
+            // Preserve text token
+            try { if (d.text) t.plainText = d.text; } catch(_) {}
+
+            // Preserve Dynamics style when provided
+            try {
+                if (typeof d.subStyle !== "undefined" && d.subStyle !== null && typeof t.subStyle !== "undefined") {
+                    t.subStyle = d.subStyle; // typically Tid.DYNAMICS
+                } else if (typeof Tid !== "undefined" && typeof t.subStyle !== "undefined") {
+                    // If original had no style but we know it is a dynamic token, you can opt in:
+                    // t.subStyle = Tid.DYNAMICS;
+                }
+            } catch(_) {}
+
+            // Keep placement if it existed
+            try { if (typeof d.placement !== "undefined" && typeof t.placement !== "undefined") t.placement = d.placement; } catch(_) {}
+
+            try { c.add(t); } catch(eAdd2) { try { console.log("[DYNDBG] add text-dynamic failed:", String(eAdd2)); } catch(e2){}; return null; }
+            return t;
+        }
+
+        return null;
+    }
+
+    function debugListDynamicsAt(score, staffIdx, tickInt) {
+        try {
+            const c = score.newCursor();
+            c.track = staffIdx * 4;
+            c.rewindToTick(tickInt);
+            const seg = c.segment;
+            let count = 0;
+            if (seg && seg.annotations) {
+                for (let i = 0; i < seg.annotations.length; ++i) {
+                    const el = seg.annotations[i];
+                    if (el && el.type === Element.DYNAMIC) {
+                        count++;
+                        try {
+                            console.log("[DYNDBG] (verify) staff", Math.floor(el.track/4),
+                                        "track", el.track, "tick", tickInt,
+                                        "type", (el.dynamicType !== undefined ? el.dynamicType : "(n/a)"),
+                                        "text", String(el.plainText),
+                                        "visible", (el.visible !== undefined ? el.visible : "(n/a)"));
+                        } catch(_){}
+                    }
+                }
+            }
+            console.log("[DYNDBG] (verify) total dynamics at tick", tickInt, "=", count, "for staff", staffIdx);
+        } catch(e) {
+            console.log("[DYNDBG] (verify) error:", String(e));
+        }
+    }
+
+    // Create a crescendo or decrescendo hairpin between two ticks.
+    function createHairpin(score, staffIdx, tickStart, tickEnd, hairpinType) {
+        if (!score) return null;
+
+        function rewindToPos(c, v) {
+            try {
+                if (typeof v === "number") { c.rewindToTick(v); return; }
+                if (v && v.ticks !== undefined) { c.rewindToFraction(v); return; }
+                if (v && v.numerator !== undefined && v.denominator !== undefined) { c.rewindToFraction(v); return; }
+            } catch (e) {}
+            c.rewindToTick(0);
+        }
+
+        const c = score.newCursor();
+        c.track = staffIdx * 4 + 0;
+
+        const hp = newElement(Element.HAIRPIN);
+        if (!hp) return null;
+        hp.hairpinType = hairpinType;
+
+        rewindToPos(c, tickStart);
+        c.add(hp);
+        rewindToPos(c, tickEnd);
+        c.add(hp);
+        return hp;
+    }
+
+    // Convenience: add a dynamic at (measureNo, beat).
+    function addDynamicByBeat(score, staffIdx, measureNo, beat, text) {
+        if (!score)
+            return null;
+
+        let m = score.firstMeasure();
+        while (m && m.no !== (measureNo - 1))
+            m = m.nextMeasure;
+
+        if (!m)
+            return null;
+
+        const ts = m.timeSig(m.tick());
+        const den = ts.denominator;
+
+        const beatFrac = api.fraction((beat - 1) * (score.division / den), score.division);
+        const tgt = m.tick().plus(beatFrac);
+
+        return createDynamic(score, staffIdx, tgt, text);
     }
 
     // ---------- Notation-copy helpers (normal mode) ----------
@@ -1342,8 +1924,8 @@ MuseScore {
             // -------- classify ----------
             var t = el.type;
             var isArticLike = (t === Element.ARTICULATION) ||
-                              (t === Element.ORNAMENT)   ||
-                              (t === Element.FERMATA);
+                    (t === Element.ORNAMENT)   ||
+                    (t === Element.FERMATA);
 
             function subNameOf(e) {
                 try { return e && e.subtypeName ? String(e.subtypeName()) : ""; } catch (_) {}
@@ -1364,8 +1946,8 @@ MuseScore {
 
             // expected track is only used for pre-add de-dupe
             var expectedTrack = (typeof forcedTrack === "number")
-                ? forcedTrack
-                : (resolvedOwner && resolvedOwner.track !== undefined ? resolvedOwner.track : undefined);
+                    ? forcedTrack
+                    : (resolvedOwner && resolvedOwner.track !== undefined ? resolvedOwner.track : undefined);
 
             // -------- local de-dupe on owner ----------
             function alreadyHas(o, trackScoped) {
@@ -1523,12 +2105,12 @@ MuseScore {
 
         for (let S of slurQueue) {
             console.log(
-                "[SLURDBG] slur attempt:",
-                "tgtStaff=", S.tgtStaff,
-                "voice=", S.voice,
-                "t0=", S.t0,
-                "t1=", S.t1
-            );
+                        "[SLURDBG] slur attempt:",
+                        "tgtStaff=", S.tgtStaff,
+                        "voice=", S.voice,
+                        "t0=", S.t0,
+                        "t1=", S.t1
+                        );
 
             // --- Anchor chords from your existing helper ---
             const ch0 = findAnchorNote(S.tgtStaff, S.voice, S.t0);
@@ -1544,10 +2126,10 @@ MuseScore {
             const n1 = ch1.notes.reduce((a,b)=>a.pitch>b.pitch?a:b);
 
             console.log(
-                "[SLURDBG] anchor notes:",
-                "n0?", !!n0,
-                "n1?", !!n1
-            );
+                        "[SLURDBG] anchor notes:",
+                        "n0?", !!n0,
+                        "n1?", !!n1
+                        );
 
             if (!n0 || !n1)
                 continue;
@@ -1657,8 +2239,8 @@ MuseScore {
 
                     // If findChordAtOrNearTick() returns a chord on the wrong staff, ignore it.
                     function chordOnCorrectStaff(ch) {
-                      try { return ch && ch.staffIdx === S.tgtStaff; } catch (_) {}
-                      return false;
+                        try { return ch && ch.staffIdx === S.tgtStaff; } catch (_) {}
+                        return false;
                     }
 
                     if (chordOnCorrectStaff(dstChord) && S.src) {
@@ -1846,10 +2428,18 @@ MuseScore {
         }
 
         // 3) endSegment.tick
+        // Guard against mu::engraving::apiv1::Segment objects that are not usable ticks.
         if (!et) {
             try {
-                if (slur.endSegment && slur.endSegment.tick !== undefined)
-                    et = toTicks(slur.endSegment.tick);
+                if (slur.endSegment && slur.endSegment.tick !== undefined) {
+                    let raw = slur.endSegment.tick;
+                    // Only accept raw ticks if they are a number or have .ticks
+                    if (typeof raw === "number")
+                        et = raw;
+                    else if (raw && raw.ticks !== undefined)
+                        et = raw.ticks;
+                    // Otherwise ignore – MS4.7 often returns Segment objects here
+                }
             } catch (_) {}
         }
 
@@ -2141,9 +2731,9 @@ MuseScore {
             // Allowed-staff filtering
             // ---------------------------------------------------------------------
             if (allowedMap &&
-                staffIdx >= 0 &&
-                allowedMap.hasOwnProperty(staffIdx) &&
-                !allowedMap[staffIdx])
+                    staffIdx >= 0 &&
+                    allowedMap.hasOwnProperty(staffIdx) &&
+                    !allowedMap[staffIdx])
                 continue;
 
             const key = String(staffIdx);
@@ -2162,10 +2752,10 @@ MuseScore {
         function hasAt(staffKey, t) {
             try {
                 return !!(
-                    root.slurStartByStaff &&
-                    root.slurStartByStaff[staffKey] &&
-                    root.slurStartByStaff[staffKey][t]
-                );
+                            root.slurStartByStaff &&
+                            root.slurStartByStaff[staffKey] &&
+                            root.slurStartByStaff[staffKey][t]
+                            );
             } catch (e) {
                 return false;
             }
@@ -2315,45 +2905,13 @@ MuseScore {
                     continue;
                 }
 
-                // ---------------------------------------
-                // ✅ Per-row (voice) slur generation
-                // ---------------------------------------
-                for (let ri = 0; ri < rows.length; ++ri) {
-                    const r = rows[ri];
-
-                    console.log("[SLURDBG]       row", ri,
-                                "exists?", !!r,
-                                "active?", r && r.active,
-                                "voice", r ? r.voice : "(null)");
-
-                    if (!r || typeof r !== "object")
-                        continue;
-
-                    if (!r.active)
-                        continue;
-
-                    const voice = clampInt(Number(r.voice ?? 1), 1, 4);
-
-                    // ✅ ✅ ✅ OPTION 2 SNAP LOGIC HERE
-                    const t1 = findSourceSlurEndTick(
-                        slur,
-                        t0,
-                        srcChords,
-                        dstStaff,
-                        voice
-                    );
-
-                    const item = {
-                        tgtStaff: dstStaff,
-                        voice: voice,
-                        t0: t0,
-                        t1: t1
-                    };
-
-                    console.log("[SLURDBG]       ✅ QUEUED slur for dstStaff:",
-                                dstStaff, "voice:", voice,
-                                "t0:", t0, "t1:", t1);
-
+                // Per-voice (unique) slur generation
+                const voices = activeVoicesFromRows(rows);
+                for (let vi = 0; vi < voices.length; ++vi) {
+                    const voice = voices[vi];
+                    const t1 = findSourceSlurEndTick(slur, t0, srcChords, dstStaff, voice);
+                    const item = { tgtStaff: dstStaff, voice: voice, t0: t0, t1: t1 };
+                    console.log("[SLURDBG] ✅ QUEUED slur (unique voice) dstStaff:", dstStaff, "voice:", voice, "t0:", t0, "t1:", t1);
                     queued.push(item);
                 }
             }
@@ -2495,11 +3053,11 @@ MuseScore {
                                 if (!pendingTiesSeen[key]) {
                                     pendingTiesSeen[key] = true;
                                     pendingTies.push({
-                                        tgtStaff: tgtStaff,
-                                        voice: voice,
-                                        tick: tTick2,
-                                        pitch: dp
-                                    });
+                                                         tgtStaff: tgtStaff,
+                                                         voice: voice,
+                                                         tick: tTick2,
+                                                         pitch: dp
+                                                     });
                                 }
                             }
                         }
@@ -2518,13 +3076,13 @@ MuseScore {
                                         if (!queuedSymbolKeys[key]) {
                                             queuedSymbolKeys[key] = true;
                                             pendingSymbols.push({
-                                                kind: 'chord',
-                                                tgtStaff: tgtStaff,
-                                                voice: voice,
-                                                tick: tTick2,
-                                                src: a,
-                                                srcStaff: srcStaff
-                                            });
+                                                                    kind: 'chord',
+                                                                    tgtStaff: tgtStaff,
+                                                                    voice: voice,
+                                                                    tick: tTick2,
+                                                                    src: a,
+                                                                    srcStaff: srcStaff
+                                                                });
                                         }
                                     }
                                 }
@@ -2687,6 +3245,13 @@ MuseScore {
 
     // Ensure the list is populated and the window is visible when the plugin opens
     onRun: {
+
+        // Attach dynamic engine functions to dynamicAPI object
+        dynamicAPI.detectDynamics   = detectDynamics;
+        dynamicAPI.createDynamic    = createDynamic;
+        dynamicAPI.createHairpin    = createHairpin;
+        dynamicAPI.addDynamicByBeat = addDynamicByBeat;
+
         console.log("Orchestrator: onRun()")
         if (!orchestratorWin) {
             orchestratorWin = orchestratorWinComponent.createObject(root)
