@@ -27,7 +27,7 @@ MuseScore {
     description: qsTr("Quickly orchestrate sketches")
     thumbnailName: "orchestrator.png"
     title: qsTr("Orchestrator")
-    version: "0.1.4"
+    version: "0.1.5beta"
 
 
     // Sprint 1: window base width and settings panel animation
@@ -112,11 +112,17 @@ MuseScore {
 
     // Keys controlled by the "All" checkbox (exclude the 'all' key itself)
     readonly property var notationFilterKeys: [
-        "dynamics","hairpins","fingerings","lyrics","chordSymbols","otherText",
-        "articulations","ornaments","slurs","ties","figuredBass","ottavas",
-        "pedalLines","otherLines","arpeggios","glissandos","fretboardDiagrams",
-        "breathMarks","tremolos","graceNotes"
+        "dynamics","hairpins","otherText",
+        "articulations","ornaments","slurs","ties",
+        "otherLines","arpeggios","glissandos",
+        "tremolos","graceNotes"
     ]
+    // readonly property var notationFilterKeys: [
+    //     "dynamics","hairpins","fingerings","lyrics","chordSymbols","otherText",
+    //     "articulations","ornaments","slurs","ties","figuredBass","ottavas",
+    //     "pedalLines","otherLines","arpeggios","glissandos","fretboardDiagrams",
+    //     "breathMarks","tremolos","graceNotes"
+    // ]
 
     // Return 0/1/2 for Unchecked / PartiallyChecked / Checked
     function notationAllState(nf) {
@@ -175,22 +181,22 @@ MuseScore {
             all: true,
             dynamics: true,
             hairpins: true,
-            fingerings: true,
+            /*fingerings: true,
             lyrics: true,
-            chordSymbols: true,   // Harmony
+            chordSymbols: true,*/   // Harmony
             otherText: true,      // Staff/System/Tempo text, etc.
             articulations: true,  // incl. fermatas
             ornaments: true,
             slurs: true,
             ties: true,
-            figuredBass: true,
-            ottavas: true,
-            pedalLines: true,
+            // figuredBass: true,
+            // ottavas: true,
+            // pedalLines: true,
             otherLines: true,     // generic text lines / voltas etc. (subject to later scoping)
             arpeggios: true,
             glissandos: true,
-            fretboardDiagrams: true,
-            breathMarks: true,
+            // fretboardDiagrams: true,
+            // breathMarks: true,
             tremolos: true,
             graceNotes: true
         }
@@ -1215,32 +1221,44 @@ MuseScore {
                         //     debugListDynamicsAt(curScore, d.tgtStaff, d.srcTickInt);
                         // } catch(_){}
 
-                        // ✅ HAIRPINS — 4.7‑safe tick handling
+                        // ✅ HAIRPIN QUEUE: mirror source spans that cover this source-chord tick
                         if (nf.hairpins) {
-                            let srcTick = chord.fraction?.ticks ?? 0;
-                            let dset = dsetAll;
-
-                            function toIntTick(v) {
-                                try {
-                                    if (v === undefined || v === null) return undefined;
-                                    if (typeof v === "number") return v;
-                                    if (v.ticks !== undefined) return parseInt(v.ticks, 10);
-                                    return fractionToTicks(v);
-                                } catch (e) { return undefined; }
-                            }
-
+                            const srcTick = chord.fraction?.ticks ?? 0;           // tick of the current source chord
+                            const dset = dsetAll;                                  // cached detectDynamics() snapshot
+                            if (!pendingHairpins.__seen) pendingHairpins.__seen = {};
                             for (let hp of dset.hairpins) {
-                                let st = toIntTick(hp.startTick);
-                                let en = toIntTick(hp.endTick);
-                                if (st === undefined || en === undefined) continue;
+                                // Keep to the same source staff to avoid cross-staff pulls
+                                if (hp.staffIdx !== undefined && hp.staffIdx !== srcStaff) continue;
+
+                                // Normalize/repair t0..t1
+                                const st = (typeof hp.t0 === 'number') ? hp.t0 : fractionToTicks(hp.t0);
+                                let   en = (typeof hp.t1 === 'number') ? hp.t1 : fractionToTicks(hp.t1);
+
+                                // If end is missing/invalid, clamp to the last source-chord tick in this selection
+                                if (!en || en < st) {
+                                    const lastSrcTick =
+                                                      (srcChords && srcChords.length > 0)
+                                                      ? (srcChords[srcChords.length - 1].parent?.tick
+                                                         ?? srcChords[srcChords.length - 1].fraction?.ticks
+                                                         ?? st)
+                                                      : st;
+                                    en = lastSrcTick;
+                                }
+                                if (!st || !en || en < st) continue;
+
+                                // If this source chord lies under the hairpin span, mirror it to destination
                                 if (srcTick >= st && srcTick <= en) {
-                                    pendingHairpins.push({
-                                                             tgtStaff: tgtStaff,
-                                                             voice: voice,
-                                                             startTick: hp.startTick,
-                                                             endTick: hp.endTick,
-                                                             type: hp.type
-                                                         });
+                                    const key = `${tgtStaff}:${voice}:${st}:${en}:${hp.type}`;
+                                    if (!pendingHairpins.__seen[key]) {
+                                        pendingHairpins.__seen[key] = true;
+                                        pendingHairpins.push({
+                                                                 tgtStaff: tgtStaff,
+                                                                 voice: voice,
+                                                                 startTick: st,
+                                                                 endTick: en,
+                                                                 type: hp.type
+                                                             });
+                                    }
                                 }
                             }
                         }
@@ -1322,13 +1340,34 @@ MuseScore {
             curScore.endCmd();
         }
 
-        // ✅ HAIRPINS
+        // ✅ HAIRPINS — run after notes/dynamics, defer one tick to avoid renderer assert window
         if (nf.hairpins && pendingHairpins.length > 0) {
-            curScore.startCmd(qsTr("Orchestrator: add hairpins"));
-            for (let h of pendingHairpins) {
-                try { dynamicAPI.createHairpin(curScore, h.tgtStaff, h.startTick, h.endTick, h.type); } catch(eHp) {}
-            }
-            curScore.endCmd();
+            Qt.callLater(function () {
+                curScore.startCmd(qsTr("Orchestrator: add hairpins"));
+                try {
+                    let created = 0;
+                    const createHP = (dynamicAPI && typeof dynamicAPI.createHairpin === 'function')
+                                   ? dynamicAPI.createHairpin
+                                   : createHairpin; // fallback to our local implementation
+
+                    for (let h of pendingHairpins) {
+                        try {
+                            const t0 = (typeof h.startTick === 'number') ? h.startTick : fractionToTicks(h.startTick);
+                            const t1 = (typeof h.endTick   === 'number') ? h.endTick   : fractionToTicks(h.endTick);
+                            const ok = createHP(curScore, h.tgtStaff, t0, t1, h.type, h.voice);
+                            if (ok) created++;
+                            try {
+                                console.log("[HPNDBG] createHairpin",
+                                            "tgtStaff=", h.tgtStaff, "voice=", h.voice,
+                                            "t0=", t0, "t1=", t1, "type=", h.type, "ok=", !!ok);
+                            } catch(_) {}
+                        } catch(_) {}
+                    }
+                    try { console.log("[HPNDBG] hairpins created:", created, "of", pendingHairpins.length); } catch(_) {}
+                } finally {
+                    curScore.endCmd();
+                }
+            });
         }
 
         // ✅ TIES
@@ -1473,19 +1512,75 @@ MuseScore {
         // Emit a reliable segment scan count
         try { console.log("[DYNDBG] segment scan count:", __segCount); } catch(e){}
 
-        // ----- HAIRPINS (unchanged from your code) -----
+        // ----- HAIRPINS (robust spanner/segment predicate + diagnostics) -----
         const sp = score.spanners;
+        let _hpCand = 0;
         for (let i = 0; i < sp.length; ++i) {
             const s = sp[i];
-            if (s && s.type === Element.HAIRPIN) {
-                hairpins.push({
-                                  type: s.hairpinType,
-                                  startTick: s.startTick,
-                                  endTick: s.endTick,
-                                  element: s
-                              });
+            if (!s) continue;
+
+            // Identify hairpins conservatively in MS4.7:
+            // We MUST avoid false positives because calling add-hairpin can crash MuseScore in this run.
+            let isHp = false;
+            let h = null;
+
+            // 1) Compute hairpinInfo once (best-effort)
+            try { h = hairpinInfo(s); } catch (_) { h = null; }
+
+            // 2) Hard gate: require BOTH a numeric hairpinType AND end-capable fields.
+            // This rejects spanners that merely *look* hairpin-like via generic properties.
+            try {
+                const ht = (function () { try { return s.hairpinType; } catch (_) { return undefined; } })();
+                const hasHairpinType = (typeof ht === "number");
+
+                const hasStartTick = (h && typeof h.t0 === "number" && h.t0 > 0);
+
+                // "End-capable" check — at least one of these must exist:
+                let hasEndCapability = false;
+                try { if (s.spannerTick2 !== undefined) hasEndCapability = true; } catch (_) {}
+                try { if (!hasEndCapability && s.tick2 !== undefined) hasEndCapability = true; } catch (_) {}
+                try { if (!hasEndCapability && s.endSegment && s.endSegment.tick !== undefined) hasEndCapability = true; } catch (_) {}
+
+                // Staff sanity: must be a real staff index
+                const hasStaff = (h && typeof h.staffIdx === "number" && h.staffIdx >= 0);
+
+                // Final conservative decision
+                if (hasHairpinType && hasStartTick && hasEndCapability && hasStaff) {
+                    isHp = true;
+                    // Normalize h.type from the authoritative property if hairpinInfo couldn't extract it
+                    if (h && (h.type === undefined || h.type === null)) h.type = ht;
+                }
+            } catch (_) {
+                isHp = false;
             }
+
+            // 3) Optional fallback: explicit element types only (safe)
+            if (!isHp) {
+                try { if (typeof Element !== "undefined" && typeof Element.HAIRPIN !== "undefined" && s.type === Element.HAIRPIN) isHp = true; } catch (_) {}
+                try { if (!isHp && typeof Element !== "undefined" && typeof Element.HAIRPIN_SEGMENT !== "undefined" && s.type === Element.HAIRPIN_SEGMENT) isHp = true; } catch (_) {}
+            }
+
+            if (!isHp) continue;
+            _hpCand++;
+
+            // Ensure we have h populated
+            if (!h) {
+                try { h = hairpinInfo(s); } catch (_) { h = null; }
+            }
+            if (!h || !h.t0) continue;
+
+            // Accept as long as we have a start; we can repair/compute t1 later.
+            hairpins.push({
+                type: h.type,
+                t0: h.t0, // integer tick
+                t1: h.t1 || 0, // may be 0 for segment-only cases
+                staffIdx: h.staffIdx,
+                element: h.element
+            });
         }
+
+        // Quick visibility: how many spanners looked hairpin-like vs. how many made it through
+        try { console.log("[HPNDBG] spanners total=", (sp ? sp.length : -1), "hairpin candidates=", _hpCand, "accepted=", hairpins.length); } catch(_) {}
 
         if (!detectDynamics.__loggedOnce) {
             try {
@@ -1717,31 +1812,293 @@ MuseScore {
         }
     }
 
-    // Create a crescendo or decrescendo hairpin between two ticks.
-    function createHairpin(score, staffIdx, tickStart, tickEnd, hairpinType) {
-        if (!score) return null;
+    // Create a crescendo/decrescendo hairpin by:
+    // 1) selecting a single NOTE/REST at t0 (to satisfy controller predicate),
+    // 2) calling the action "add-hairpin",
+    // 3) stretching the result to t1 (robust property set),
+    // 4) verifying and logging.
+    // Returns true on success.
+    function createHairpin(score, staffIdx, tickStart, tickEnd, hairpinType, voiceOpt) {
+        if (!score) return false;
 
-        function rewindToPos(c, v) {
+        // --- local helpers (no dependencies outside this file) ---
+        function toIntTick(v) {
+            if (typeof v === "number") return v;
+            try { if (v && v.ticks !== undefined) return parseInt(v.ticks, 10); } catch(_) {}
+            return fractionToTicks(v);
+        }
+        function makeFracFromTick(t) {
+            // 'division' is the global ticks/quarter; api.fraction(ticks, division)
+            try { return api.fraction(t, division); } catch(_) { return t; }
+        }
+        function findRestAt(staff, voice, absTick) {
             try {
-                if (typeof v === "number") { c.rewindToTick(v); return; }
-                if (v && v.ticks !== undefined) { c.rewindToFraction(v); return; }
-                if (v && v.numerator !== undefined && v.denominator !== undefined) { c.rewindToFraction(v); return; }
-            } catch (e) {}
-            c.rewindToTick(0);
+                const c = curScore.newCursor();
+                c.track = staff * 4 + (voice - 1);
+                c.rewindToTick(absTick);
+                if (c.element && c.element.type === Element.REST) return c.element;
+            } catch (_) {}
+            return null;
+        }
+        function findRestAtOrNearTick(staff, voice, absTick) {
+            return findRestAt(staff, voice, absTick)
+                    || findRestAt(staff, voice, absTick - 1)
+                    || findRestAt(staff, voice, absTick + 1);
+        }
+        // Return the hairpin object we just created (start ~ t0 on staffIdx), else null
+        function pickHairpinAtStartTick(t0) {
+            try {
+                const sp = curScore.spanners || [];
+                try { console.log("sp: ", sp); } catch(_){}
+
+                for (let i = 0; i < sp.length; ++i) {
+                    const s = sp[i]; if (!s) continue;
+                    try { console.log("s: ", s); } catch(_){}
+                    // Identify hairpin-like spanners: prefer type/name checks, avoid "hairpinType !== undefined"
+                    let isHp = false;
+                    try { if (s.type === Element.HAIRPIN) isHp = true; } catch(_) {}
+                    if (!isHp) {
+                        try {
+                            const nm = String(s.name ?? "");
+                            if (nm.indexOf("Hairpin") >= 0) isHp = true;
+                        } catch(_) {}
+                    }
+                    if (!isHp) continue;
+                    const st = spStartTick(s);
+                    if (Math.abs(st - t0) <= 1) {
+                        let stf = -1; try { stf = Math.floor((s.track || 0) / 4); } catch(_) {}
+                        if (stf === staffIdx) return s;
+                    }
+                }
+            } catch(_) {}
+            return null;
+        }
+        // Try to set hp's end tick to t1 using the best property available
+        function setHairpinEndTick(hp, t1) {
+            // Prefer spannerTick2 or tick2 with a Fraction if possible
+            const f = makeFracFromTick(t1);
+            let ok = false;
+            try { if (hp.spannerTick2 !== undefined) { hp.spannerTick2 = f; ok = true; } } catch(_) {}
+            if (!ok) { try { if (hp.tick2 !== undefined) { hp.tick2 = f; ok = true; } } catch(_) {} }
+            // Some builds expose endSegment with a tick; try to set end via that segment object
+            if (!ok) {
+                try {
+                    if (hp.endSegment && hp.endSegment.tick !== undefined) {
+                        // endSegment.tick often expects a Fraction/number as well
+                        hp.endSegment.tick = f; ok = true;
+                    }
+                } catch(_) {}
+            }
+            return ok;
+        }
+        function setHairpinTypeIfNeeded(hp, wantType) {
+            try {
+                if (hp.hairpinType !== undefined && wantType !== undefined && wantType !== null) {
+                    hp.hairpinType = wantType;
+                }
+            } catch(_) {}
+        }
+        // Cresc vs. Dim decision (best-effort; your detectDynamics supplies type)
+        function wantDim(tp) {
+            try {
+                return (tp === HairpinType.DIM_HAIRPIN) || (tp === HairpinType.DECRESC_HAIRPIN) || (tp === 2);
+            } catch(_) {}
+            return false;
         }
 
-        const c = score.newCursor();
-        c.track = staffIdx * 4 + 0;
+        // --- inputs & guards ---
+        const tRaw0 = toIntTick(tickStart);
+        let   tRaw1 = toIntTick(tickEnd);
+        const voice = clampInt(Number(voiceOpt ?? 1), 1, 4);
 
-        const hp = newElement(Element.HAIRPIN);
-        if (!hp) return null;
-        hp.hairpinType = hairpinType;
+        // Ensure a positive span; if not, snap to the next chord tick
+        if (!(tRaw1 > tRaw0)) {
+            const tNext = findNextChordTick(staffIdx, voice, tRaw0);
+            if (tNext !== null && tNext > tRaw0) tRaw1 = tNext; else return false;
+        }
 
-        rewindToPos(c, tickStart);
-        c.add(hp);
-        rewindToPos(c, tickEnd);
-        c.add(hp);
-        return hp;
+        // Guarantee there are anchors near both ends on the destination
+        const hasStart = hasChordAtOrNearTick(staffIdx, voice, tRaw0);
+        const hasEnd   = hasChordAtOrNearTick(staffIdx, voice, tRaw1);
+        if (!hasStart || !hasEnd) {
+            try { console.log("[HPNDBG] skip (no anchors) staff=", staffIdx, "voice=", voice, "t0=", tRaw0, "t1=", tRaw1); } catch(_){}
+            return false;
+        }
+
+        // --- selection: ensure both CHORDREST and NOTE are represented for the action ---
+        const note0 = findAnyAnchorNoteAt(staffIdx, voice, tRaw0);
+        const rest0 = note0 ? null : findRestAtOrNearTick(staffIdx, voice, tRaw0);
+
+        // We will:
+        //   1) If a NOTE exists, select its parent CHORD as SINGLE, then ADD the NOTE (predicate satisfied).
+        //   2) Else, select the REST as SINGLE.
+        let chord0 = null;
+        try {
+            chord0 = (note0 && note0.parent && note0.parent.type === Element.CHORD) ? note0.parent : null;
+        } catch (_) {
+            chord0 = null;
+        }
+        const anchor0 = note0 || rest0;
+
+        if (!anchor0) {
+            try { console.log("[HPNDBG] no start anchor (note/rest) at", tRaw0, "staff", staffIdx, "voice", voice); } catch(_){}
+            return false;
+        }
+
+        // --- dispatch and stretch ---
+        try {
+            // Snapshot spanners BEFORE so we can detect what was newly created
+            function spannerId(s) {
+                try { return String(s); } catch (_) { return ""; }
+            }
+            function snapshotSpannerSet() {
+                const set = {};
+                const arr = (curScore && curScore.spanners) ? curScore.spanners : [];
+                for (let i = 0; i < arr.length; ++i) {
+                    const id = spannerId(arr[i]);
+                    if (id) set[id] = true;
+                }
+                return set;
+            }
+            const beforeSet = snapshotSpannerSet();
+
+            curScore.selection.clear();
+
+            // IMPORTANT: keep a NOTE selected (predicate), but also provide CHORD (ChordRest) context.
+            // Select CHORD first, then add NOTE.
+            let singleOk = false;
+            try {
+                if (note0 && chord0) {
+                    // 1) Select the chord (ChordRest context)
+                    singleOk = curScore.selection.select(chord0, /*add=*/false);
+
+                    // 2) Add the note (so "noteOrRestSelected" is satisfied)
+                    if (singleOk) {
+                        try { curScore.selection.select(note0, /*add=*/true); } catch (_) {}
+                    }
+                } else if (anchor0) {
+                    // Fallback: rest anchor (still satisfies noteOrRestSelected as "rest selected")
+                    singleOk = curScore.selection.select(anchor0, /*add=*/false);
+                }
+            } catch (_) {
+                singleOk = false;
+            }
+
+            if (!singleOk) {
+                try {
+                    console.log("[HPNDBG] selection failed; aborting add-hairpin",
+                        "staff=", staffIdx, "voice=", voice, "t0=", tRaw0, "t1=", tRaw1,
+                        "hadChord0=", !!chord0, "hadNote0=", !!note0, "hadAnchor0=", !!anchor0);
+                } catch (_) {}
+                return false;
+            }
+
+
+            // Choose command based on intended direction
+            const actionName = wantDim(hairpinType) ? "add-hairpin-reverse" : "add-hairpin";
+
+            try {
+                console.log("[HPNDBG] ready to call", actionName, "singleOk=", singleOk,
+                            "isRange=", (curScore.selection ? curScore.selection.isRange : "(n/a)"));
+            } catch (_) {}
+
+            // Safety gate: if this "hairpinType" isn't actually a known hairpin enum, bail.
+            // In this build, bad calls can crash MuseScore.
+            try {
+                if (hairpinType === undefined || hairpinType === null || typeof hairpinType !== "number") {
+                    console.log("[HPNDBG] abort: invalid hairpinType", hairpinType);
+                    return false;
+                }
+            } catch (_) {}
+
+            cmd(actionName);
+
+            // Snapshot spanners AFTER; if nothing new appeared, action did nothing
+            const afterSet = snapshotSpannerSet();
+
+            // Find newly created spanners (ids present in after, not in before)
+            const newSpanners = [];
+            const arrAfter = (curScore && curScore.spanners) ? curScore.spanners : [];
+            for (let i = 0; i < arrAfter.length; ++i) {
+                const s = arrAfter[i];
+                const id = spannerId(s);
+                if (id && !beforeSet[id]) newSpanners.push(s);
+            }
+
+            if (newSpanners.length === 0) {
+                try {
+                    console.log("[HPNDBG] add-hairpin produced no new spanners",
+                                "staff=", staffIdx, "voice=", voice, "t0=", tRaw0, "t1=", tRaw1,
+                                "action=", actionName);
+                } catch (_) {}
+                return false;
+            }
+
+            // Prefer a new spanner whose name includes "Hairpin" and starts near t0 on this staff
+            function isHairpinByName(s) {
+                try {
+                    const nm = String(s.name ?? "");
+                    return nm.indexOf("Hairpin") >= 0;
+                } catch (_) {}
+                return false;
+            }
+
+            let hp = null;
+            for (let i = 0; i < newSpanners.length; ++i) {
+                const s = newSpanners[i];
+                if (!isHairpinByName(s)) continue;
+                const st = spStartTick(s);
+                if (Math.abs(st - tRaw0) > 1) continue;
+                let stf = -1;
+                try { stf = Math.floor((s.track ?? 0) / 4); } catch (_) { stf = -1; }
+                if (stf === staffIdx) { hp = s; break; }
+            }
+
+            // Fallback: if none matched by name, still try the first new spanner
+            if (!hp) hp = newSpanners[0];
+
+            if (!hp) {
+                try { console.log("[HPNDBG] hairpin NOT FOUND among new spanners",
+                                  "staff=", staffIdx, "voice=", voice, "t0=", tRaw0, "t1=", tRaw1,
+                                  "action=", actionName); } catch (_) {}
+                return false;
+            }
+
+            // Normalize type (crescendo/decrescendo) if API exposes it
+            setHairpinTypeIfNeeded(hp, hairpinType);
+
+            // Stretch to t1; log whether we succeeded
+            const stretched = setHairpinEndTick(hp, tRaw1);
+
+            // Verify presence (and optionally the end, if hairpinInfo returns it)
+            let ok = !!hp;
+            try {
+                // start verification (existing helper)
+                const st = spStartTick(hp);
+                // end verification (best-effort only; hairpinInfo tolerates missing end in some 4.7 builds)
+                let endOk = true;
+                try {
+                    const info = hairpinInfo(hp);
+                    if (info && info.t1 && info.t1 > 0) endOk = (info.t1 >= tRaw1 - 1);
+                } catch(_) {}
+                ok = ok && (Math.abs(st - tRaw0) <= 1) && endOk;
+            } catch(_) {}
+
+            try {
+                console.log("[HPNDBG] hairpin", (ok ? "CREATED" : "NOT FOUND"),
+                            "tgtStaff=", staffIdx, "voice=", voice,
+                            "t0=", tRaw0, "t1=", tRaw1, "type=", hairpinType,
+                            "actionsTried=add-hairpin", "used=add-hairpin",
+                            "stretched=", !!stretched);
+            } catch(_) {}
+
+            return ok;
+        } catch (e) {
+            try { console.log("[HPNDBG] hairpin action error:", String(e)); } catch(_){}
+            return false;
+        } finally {
+            try { curScore.selection.clear(); } catch(_){}
+        }
     }
 
     // Convenience: add a dynamic at (measureNo, beat).
@@ -2509,6 +2866,123 @@ MuseScore {
         }
 
         return { st, et, sStaff, eStaff };
+    }
+
+    // 4.7-aware hairpin info extractor (similar to slurInfo)
+    function hairpinInfo(hp) {
+        function toTicks(v) {
+            if (!v) return 0;
+            if (typeof v === "number") return v;
+            try {
+                if (v.ticks !== undefined) return parseInt(v.ticks, 10);
+            } catch (_) {}
+            try {
+                if (v.numerator !== undefined && v.denominator !== undefined) {
+                    var num = parseInt(v.numerator, 10);
+                    var den = parseInt(v.denominator, 10);
+                    if (!isNaN(num) && !isNaN(den) && den !== 0)
+                        return Math.floor((num * division) / den);
+                }
+            } catch (_) {}
+            return 0;
+        }
+
+        // start (t0)
+        let t0 = 0;
+        try { if (hp.spannerTick !== undefined) t0 = toTicks(hp.spannerTick); } catch(_) {}
+        if (!t0) { try { if (hp.tick !== undefined) t0 = toTicks(hp.tick); } catch(_) {} }
+        if (!t0) {
+            try { if (hp.startSegment && hp.startSegment.tick !== undefined) t0 = toTicks(hp.startSegment.tick); } catch(_) {}
+        }
+        if (!t0 && hp.segments && hp.segments.length > 0) {
+            try {
+                const seg0 = hp.segments[0];
+                if (seg0.tick !== undefined) t0 = toTicks(seg0.tick);
+                else if (seg0.startSegment && seg0.startSegment.tick !== undefined) t0 = toTicks(seg0.startSegment.tick);
+            } catch(_) {}
+        }
+
+        // startElement → parent.tick (segment/chord owners)
+        if (!t0) {
+            try {
+                if (hp.startElement && hp.startElement.parent && hp.startElement.parent.tick !== undefined) {
+                    t0 = toTicks(hp.startElement.parent.tick);
+                }
+            } catch(_) {}
+        }
+
+        // end (t1)
+        let t1 = 0;
+        try { if (hp.spannerTick2 !== undefined) t1 = toTicks(hp.spannerTick2); } catch(_) {}
+        if (!t1) { try { if (hp.tick2 !== undefined) t1 = toTicks(hp.tick2); } catch(_) {} }
+        if (!t1) {
+            try {
+                if (hp.endSegment && hp.endSegment.tick !== undefined) {
+                    let raw = hp.endSegment.tick;
+                    if (typeof raw === "number") t1 = raw;
+                    else if (raw && raw.ticks !== undefined) t1 = raw.ticks;
+                }
+            } catch(_) {}
+        }
+        if (!t1 && hp.segments && hp.segments.length > 0) {
+            try {
+                const segLast = hp.segments[hp.segments.length - 1];
+                if (segLast.tick2 !== undefined) t1 = toTicks(segLast.tick2);
+                else if (segLast.tick !== undefined) t1 = toTicks(segLast.tick);
+                else if (segLast.endSegment && segLast.endSegment.tick !== undefined) t1 = toTicks(segLast.endSegment.tick);
+            } catch(_) {}
+        }
+
+        // endElement → parent.tick (segment/chord owners)
+        if (!t1) {
+            try {
+                if (hp.endElement && hp.endElement.parent && hp.endElement.parent.tick !== undefined) {
+                    t1 = toTicks(hp.endElement.parent.tick);
+                }
+            } catch(_) {}
+        }
+
+        // staff (best effort)
+        let staffIdx = -1;
+        try { if (hp.track !== undefined) staffIdx = Math.floor(hp.track / 4); } catch(_) {}
+        if (staffIdx < 0) { try { if (hp.spannerTrack2 !== undefined) staffIdx = Math.floor(hp.spannerTrack2 / 4); } catch(_) {} }
+
+        // type
+        let hType = undefined;
+        try { if (hp.hairpinType !== undefined) hType = hp.hairpinType; } catch(_) {}
+
+        return { t0: t0, t1: t1, staffIdx: staffIdx, type: hType, element: hp };
+    }
+
+    function looksLikeHairpinSpanner(s) {
+        if (!s) return false;
+
+        // 1) Must have a hairpinType property AND it must be numeric
+        let ht = undefined;
+        try { ht = s.hairpinType; } catch (_) { ht = undefined; }
+        if (typeof ht !== "number") return false;
+
+        // 2) Must have a plausible start tick using spannerTick/tick/startSegment
+        let t0 = 0;
+        try { t0 = spStartTick(s); } catch (_) { t0 = 0; }
+        if (!(typeof t0 === "number" && t0 > 0)) return false;
+
+        // 3) Must have some plausible end capability (spannerTick2/tick2/endSegment)
+        let hasEnd = false;
+        try { if (s.spannerTick2 !== undefined) hasEnd = true; } catch (_) {}
+        try { if (!hasEnd && s.tick2 !== undefined) hasEnd = true; } catch (_) {}
+        try { if (!hasEnd && s.endSegment && s.endSegment.tick !== undefined) hasEnd = true; } catch (_) {}
+        if (!hasEnd) return false;
+
+        // 4) Must have a track-derived staff index
+        try {
+            const stf = Math.floor((s.track ?? 0) / 4);
+            if (!(stf >= 0)) return false;
+        } catch (_) {
+            return false;
+        }
+
+        return true;
     }
 
     //
@@ -5254,27 +5728,27 @@ MuseScore {
                                                     && notationElementsWrapper.currentPreset().notationFilter.hairpins)
                                         onClicked: notationElementsWrapper.toggleKeyInverse("hairpins")
                                     }
-                                    CheckBox {
-                                        text: qsTr("Fingerings")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.fingerings)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("fingerings")
-                                    }
-                                    CheckBox {
-                                        text: qsTr("Lyrics")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.lyrics)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("lyrics")
-                                    }
-                                    CheckBox {
-                                        text: qsTr("Chord symbols")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.chordSymbols)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("chordSymbols")
-                                    }
+                                    // CheckBox {
+                                    //     text: qsTr("Fingerings")
+                                    //     checked: !!(notationElementsWrapper.currentPreset()
+                                    //                 && notationElementsWrapper.currentPreset().notationFilter
+                                    //                 && notationElementsWrapper.currentPreset().notationFilter.fingerings)
+                                    //     onClicked: notationElementsWrapper.toggleKeyInverse("fingerings")
+                                    // }
+                                    // CheckBox {
+                                    //     text: qsTr("Lyrics")
+                                    //     checked: !!(notationElementsWrapper.currentPreset()
+                                    //                 && notationElementsWrapper.currentPreset().notationFilter
+                                    //                 && notationElementsWrapper.currentPreset().notationFilter.lyrics)
+                                    //     onClicked: notationElementsWrapper.toggleKeyInverse("lyrics")
+                                    // }
+                                    // CheckBox {
+                                    //     text: qsTr("Chord symbols")
+                                    //     checked: !!(notationElementsWrapper.currentPreset()
+                                    //                 && notationElementsWrapper.currentPreset().notationFilter
+                                    //                 && notationElementsWrapper.currentPreset().notationFilter.chordSymbols)
+                                    //     onClicked: notationElementsWrapper.toggleKeyInverse("chordSymbols")
+                                    // }
                                     CheckBox {
                                         text: qsTr("Other text")
                                         checked: !!(notationElementsWrapper.currentPreset()
@@ -5310,27 +5784,27 @@ MuseScore {
                                                     && notationElementsWrapper.currentPreset().notationFilter.ties)
                                         onClicked: notationElementsWrapper.toggleKeyInverse("ties")
                                     }
-                                    CheckBox {
-                                        text: qsTr("Figured bass")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.figuredBass)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("figuredBass")
-                                    }
-                                    CheckBox {
-                                        text: qsTr("Ottavas")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.ottavas)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("ottavas")
-                                    }
-                                    CheckBox {
-                                        text: qsTr("Pedal lines")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.pedalLines)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("pedalLines")
-                                    }
+                                    // CheckBox {
+                                    //     text: qsTr("Figured bass")
+                                    //     checked: !!(notationElementsWrapper.currentPreset()
+                                    //                 && notationElementsWrapper.currentPreset().notationFilter
+                                    //                 && notationElementsWrapper.currentPreset().notationFilter.figuredBass)
+                                    //     onClicked: notationElementsWrapper.toggleKeyInverse("figuredBass")
+                                    // }
+                                    // CheckBox {
+                                    //     text: qsTr("Ottavas")
+                                    //     checked: !!(notationElementsWrapper.currentPreset()
+                                    //                 && notationElementsWrapper.currentPreset().notationFilter
+                                    //                 && notationElementsWrapper.currentPreset().notationFilter.ottavas)
+                                    //     onClicked: notationElementsWrapper.toggleKeyInverse("ottavas")
+                                    // }
+                                    // CheckBox {
+                                    //     text: qsTr("Pedal lines")
+                                    //     checked: !!(notationElementsWrapper.currentPreset()
+                                    //                 && notationElementsWrapper.currentPreset().notationFilter
+                                    //                 && notationElementsWrapper.currentPreset().notationFilter.pedalLines)
+                                    //     onClicked: notationElementsWrapper.toggleKeyInverse("pedalLines")
+                                    // }
                                     CheckBox {
                                         text: qsTr("Other lines")
                                         checked: !!(notationElementsWrapper.currentPreset()
@@ -5352,20 +5826,20 @@ MuseScore {
                                                     && notationElementsWrapper.currentPreset().notationFilter.glissandos)
                                         onClicked: notationElementsWrapper.toggleKeyInverse("glissandos")
                                     }
-                                    CheckBox {
-                                        text: qsTr("Fretboard diagrams") // fixed typo
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.fretboardDiagrams)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("fretboardDiagrams")
-                                    }
-                                    CheckBox {
-                                        text: qsTr("Breath marks")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.breathMarks)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("breathMarks")
-                                    }
+                                    // CheckBox {
+                                    //     text: qsTr("Fretboard diagrams") // fixed typo
+                                    //     checked: !!(notationElementsWrapper.currentPreset()
+                                    //                 && notationElementsWrapper.currentPreset().notationFilter
+                                    //                 && notationElementsWrapper.currentPreset().notationFilter.fretboardDiagrams)
+                                    //     onClicked: notationElementsWrapper.toggleKeyInverse("fretboardDiagrams")
+                                    // }
+                                    // CheckBox {
+                                    //     text: qsTr("Breath marks")
+                                    //     checked: !!(notationElementsWrapper.currentPreset()
+                                    //                 && notationElementsWrapper.currentPreset().notationFilter
+                                    //                 && notationElementsWrapper.currentPreset().notationFilter.breathMarks)
+                                    //     onClicked: notationElementsWrapper.toggleKeyInverse("breathMarks")
+                                    // }
                                     CheckBox {
                                         text: qsTr("Tremolos")
                                         checked: !!(notationElementsWrapper.currentPreset()
