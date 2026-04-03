@@ -14,6 +14,7 @@ import QtQuick.Controls 2.15
 // import QtQuick.Dialogs
 import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
+import MuseApi.Log 1.0 //support for Log.info|warn|error|debug("tag", "message" + var)
 import Muse.Ui
 import Muse.UiComponents
 import MuseScore 3.0
@@ -28,6 +29,8 @@ MuseScore {
     thumbnailName: "orchestrator.png"
     title: qsTr("Orchestrator")
     version: "0.2.0"
+
+    property string tag: root.title
 
 
     // Sprint 1: window base width and settings panel animation
@@ -250,7 +253,7 @@ MuseScore {
             ocPrefs.presetsJSON = JSON.stringify(presets, null, 2)
             if (ocPrefs.sync) { try { ocPrefs.sync() } catch (e2) {} }
         } catch (e) {
-            console.log("[Orchestrator] Failed to save presets:", String(e))
+            Log.error(tag, "Failed to save presets: " + String(e))
         }
     }
 
@@ -902,10 +905,10 @@ MuseScore {
 
     // Ensure the list is populated and the window is visible when the plugin opens
     onRun: {
-        console.log("Orchestrator: onRun()")
+        Log.info(tag, "onRun()")
         if (!orchestratorWin) {
             orchestratorWin = orchestratorWinComponent.createObject(root)
-            console.log("Orchestrator: window created:", orchestratorWin)
+            Log.info(tag, "window created: " + orchestratorWin)
         }
 
         // ---------- Restore UI state (pre-show, no flicker) ----------
@@ -941,7 +944,7 @@ MuseScore {
                 }
             } catch (e) {}
         } catch (e) {
-            console.log("[Orchestrator] Restore UI state failed:", String(e));
+            Log.error(tag, "Restore UI state failed: " + String(e));
         }
         // -----------------------------------------------
 
@@ -975,12 +978,11 @@ MuseScore {
                     orchestratorWin.y = Math.max(minY, Math.min(maxY, savedY));
                 }
             } catch (e) {
-                console.log("[Orchestrator] Restore window position failed:", String(e));
+                Log.error(tag, "Restore window position failed: " + String(e));
             }
             // ---------------------------------------------------
 
-            console.log("Orchestrator: post-show visible =", orchestratorWin.visible,
-                        "visibility =", orchestratorWin.visibility)
+            Log.debug(tag, "post-show visible: " + orchestratorWin.visible + "   visibility: " + orchestratorWin.visibility)
             buildStaffListModel()
             // Load presets (Settings-backed) and apply the first preset to the UI
             loadPresetsFromSettings()
@@ -1005,7 +1007,7 @@ MuseScore {
                     uiRef.selectedIndex = -1; // normal mode: no persistent selection
                 }
             } catch (e) {
-                console.log("[Orchestrator] Restore selected card failed:", String(e));
+                Log.error(tag, "Restore selected card failed: " + String(e));
             }
         })
     }
@@ -1646,7 +1648,7 @@ MuseScore {
                     //toolTip: qsTr("Add preset (placeholder)")
                     onClicked: {
                         saveCurrentPreset()
-                        console.log("[Orchestrator] Preset saved:", presetTitleField.text)
+                        Log.info(tag, "Preset saved: " + presetTitleField.text)
                     }
                 }
 
@@ -2129,7 +2131,7 @@ MuseScore {
                             }
 
                             onAccepted: {
-                                console.log("[Orchestrator] Preset title accepted:", presetTitleField.text)
+                                Log.info(tag, "Preset title accepted: " + presetTitleField.text)
                             }
                             // Default caret position at the beginning on first render
                             Component.onCompleted: {
