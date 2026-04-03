@@ -24,11 +24,12 @@ pragma Singleton
 MuseScore {
     id: root
 
-    categoryCode: "Composing/arranging tools"
+    title: qsTr("Orchestrator")
     description: qsTr("Quickly orchestrate sketches")
     thumbnailName: "orchestrator.png"
-    title: qsTr("Orchestrator")
     version: "0.2.0"
+
+    categoryCode: qsTr("Composing/arranging tools")
 
     property string tag: root.title
 
@@ -68,7 +69,7 @@ MuseScore {
     // Store presets JSON via QML Settings (on-disk per-user config)
     Settings {
         id: ocPrefs
-        category: "Orchestrator"
+        category: root.title
         // Single string holds our presets array as JSON
         property string presetsJSON: ""
         property string accentHex: ""
@@ -374,7 +375,7 @@ MuseScore {
         var baseName = (presetClipboard && typeof presetClipboard.name === 'string' && presetClipboard.name.length)
                 ? presetClipboard.name
                 : qsTr("New Preset");
-        p.name = baseName + " copy";
+        p.name = baseName + qsTr(" copy");
 
         // Restore backgroundColor (if any)
         if (presetClipboard.backgroundColor && presetClipboard.backgroundColor.length) {
@@ -424,7 +425,7 @@ MuseScore {
     // Instrument-only name (no ": Staff N") for use on the preset card
     function staffInstrumentNameByIdx(staffIdx) {
         var p = partForStaff(staffIdx);
-        var nm = nameForPart(p, 0) || 'Unknown instrument';
+        var nm = nameForPart(p, 0) || qsTr("Unknown instrument");
         return cleanName(nm);
     }
 
@@ -877,7 +878,7 @@ MuseScore {
             var item = staffListModel.get(i)
             if (item && item.idx === staffIdx) return cleanName(item.name)
         }
-        var base = nameForPart(partForStaff(staffIdx), 0) || 'Unknown instrument'
+        var base = nameForPart(partForStaff(staffIdx), 0) || qsTr("Unknown instrument")
         return cleanName(base + ': ' + qsTr('Staff %1').arg(1))
     }
 
@@ -1020,7 +1021,7 @@ MuseScore {
             // Make absolutely sure the window is treated as a normal, non-modal top-level window
             visibility: Window.Windowed
             modality: Qt.NonModal
-            title: qsTr("Orchestrator")
+            title: root.title
 
             // Expose inner objects to root (so root-level helpers can reach them)
             property alias rootUIRef: rootUI
@@ -1491,11 +1492,11 @@ MuseScore {
                                                 // Otherwise binary-search the maximum number of words that fit with " more..."
                                                 var words = base.split(/\s+/)
                                                 var lo = 0, hi = words.length, fit = 0
-                                                var suffix = " more..."
+                                                var suffix = qsTr(" more...")
 
                                                 while (lo <= hi) {
                                                     var mid = Math.floor((lo + hi) / 2)
-                                                    var candidate = (mid > 0 ? words.slice(0, mid).join(" ") + suffix : "more...")
+                                                    var candidate = (mid > 0 ? words.slice(0, mid).join(" ") + suffix : trim(suffix))
                                                     stavesMeasure.text = candidate
 
                                                     if (stavesMeasure.lineCount <= maxLines) {
@@ -1507,7 +1508,7 @@ MuseScore {
 
                                                 }
 
-                                                var out = (fit > 0 ? words.slice(0, fit).join(" ") + suffix : "more...")
+                                                var out = (fit > 0 ? words.slice(0, fit).join(" ") + suffix : trim(suffix))
                                                 displayStaves = out
                                             }
 
@@ -2498,14 +2499,14 @@ MuseScore {
                         // Model for buttons (top to bottom)
                         ListModel {
                             id: noteButtonsModel
-                            ListElement { name: "Top note" }
-                            ListElement { name: "Seventh note" }
-                            ListElement { name: "Sixth note" }
-                            ListElement { name: "Fifth note" }
-                            ListElement { name: "Fourth note" }
-                            ListElement { name: "Third note" }
-                            ListElement { name: "Second note" }
-                            ListElement { name: "Bottom note" }
+                            ListElement { name: qsTr("Top note")}
+                            ListElement { name: qsTr("Seventh note")}
+                            ListElement { name: qsTr("Sixth note")}
+                            ListElement { name: qsTr("Fifth note")}
+                            ListElement { name: qsTr("Fourth note")}
+                            ListElement { name: qsTr("Third note")}
+                            ListElement { name: qsTr("Second note")}
+                            ListElement { name: qsTr("Bottom note")}
 
                             // If rows are ever added later, default them to Voice 1
                             onCountChanged: {
