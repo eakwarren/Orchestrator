@@ -27,7 +27,7 @@ MuseScore {
     title: qsTr("Orchestrator")
     description: qsTr("Quickly orchestrate sketches")
     thumbnailName: "orchestrator.png"
-    version: "0.2.0"
+    version: "0.2.1"
 
     categoryCode: qsTr("Composing/arranging tools")
 
@@ -774,6 +774,821 @@ MuseScore {
         refreshPresetsListModel()
         if (uiRef && model)
             uiRef.selectedIndex = Math.min(keep, Math.max(0, model.count - 1))
+    }
+
+    //--------------------------------------------------------------------------------
+    // Orchestration Engine
+    //--------------------------------------------------------------------------------
+
+    // cmd() strings must match MuseScore command names
+    // see src/notationscene/internal/notationuiactions.cpp
+    function __doCopy()   { cmd("action://copy") }
+    function __doPaste()  { cmd("action://paste") }
+    function __doDelete() { cmd("action://delete") }
+    function __escape()   { cmd("escape") } //action://notation/cancel
+
+    function __pitchUp()         { cmd("pitch-up") }
+    function __pitchDown()       { cmd("pitch-down") }
+    function __pitchUpOctave()   { cmd("pitch-up-octave") }
+    function __pitchDownOctave() { cmd("pitch-down-octave") }
+
+    function __setVoice(v) {
+        var vv = Number(v || 1)
+        if (vv < 1) vv = 1
+        if (vv > 4) vv = 4
+        cmd("voice-" + vv)
+    }
+
+    function __dbgElement(el) {
+        if (!el) return "null"
+        var t = (el.type !== undefined) ? String(el.type) : "?"
+        var tick = "?"
+        try { tick = (el.segment && el.segment.tick !== undefined) ? String(el.segment.tick) : (el.tick !== undefined ? String(el.tick) : "?") } catch(e) {}
+        var pitch = "?"
+        try { pitch = (el.pitch !== undefined) ? String(el.pitch) : "?" } catch(e2) {}
+        return "type=" + t + " tick=" + tick + " pitch=" + pitch
+    }
+
+    function __dbgSelection() {
+        if (!curScore || !curScore.selection) return "selection=null"
+        var s = curScore.selection
+        // We don't know which properties your build exposes, so probe safely.
+        var parts = []
+        try { parts.push("isRange=" + String(!!s.isRange)) } catch(e0) {}
+        try { parts.push("startTick=" + String(s.startSegment && s.startSegment.tick !== undefined ? s.startSegment.tick : "?")) } catch(e1) {}
+        try { parts.push("endTick=" + String(s.endSegment && s.endSegment.tick !== undefined ? s.endSegment.tick : "?")) } catch(e2) {}
+        try { parts.push("elementsLen=" + String(s.elements ? s.elements.length : "?")) } catch(e3) {}
+        try { parts.push("element=" + __dbgElement(s.element)) } catch(e4) {}
+        return parts.join(" ")
+    }
+
+    function __getSourceSelectionSegments() {
+        if (!curScore) return { start: null, end: null }
+
+        var c = curScore.newCursor()
+        if (!c) return { start: null, end: null }
+
+        var startSeg = null
+        var endSeg = null
+
+        try { c.rewind(Cursor.SELECTION_START) } catch (e) { try { c.rewind(1) } catch (e2) {} }
+        startSeg = c.segment
+
+        try { c.rewind(Cursor.SELECTION_END) } catch (e) { try { c.rewind(2) } catch (e2) {} }
+        endSeg = c.segment
+
+        if (!startSeg) return { start: null, end: null }
+        if (!endSeg) endSeg = startSeg
+
+        var st = (startSeg.tick !== undefined) ? startSeg.tick : 0
+        var et = (endSeg.tick !== undefined) ? endSeg.tick : st
+
+        if (et <= st) {
+            try { c.rewind(Cursor.SELECTION_START) } catch (e) { try { c.rewind(1) } catch (e2) {} }
+            c.next()
+            if (c.segment) endSeg = c.segment
+        }
+
+        return { start: startSeg, end: endSeg }
+    }
+
+    function __seekCursorToTick(c, targetTick) {
+        if (!c) return false
+        var t = Number(targetTick || 0)
+
+        try { c.rewind(Cursor.SCORE_START) } catch (e) { try { c.rewind(0) } catch (e2) {} }
+
+        var guard = 0
+        while (c.segment && c.segment.tick !== undefined && c.segment.tick < t && guard < 200000) {
+            c.next()
+            guard++
+        }
+        return !!c.segment
+    }
+
+    function __selectPasteAnchorForStaff(staffIdx, startTick, endTick) {
+        if (!curScore) return false
+
+        var c = curScore.newCursor()
+        if (!c) return false
+
+        c.track = staffBaseTrack(staffIdx)
+
+        var st = Number(startTick || 0)
+        var et = (endTick === undefined || endTick === null) ? st : Number(endTick)
+
+        if (et < st) {
+            var tmp = st
+            st = et
+            et = tmp
+        }
+
+        if (!__seekCursorToTick(c, st)) return false
+
+        var guard = 0
+        while (c.segment && c.segment.tick !== undefined && c.segment.tick < et && guard < 200000) {
+            var el = c.element
+            if (el) {
+                try {
+                    el.selected = true
+                    return true
+                } catch (e) {
+                }
+            }
+            c.next()
+            guard++
+        }
+
+        return false
+    }
+
+    // Select the same segment-range but on a single destination staff
+    function __selectRangeForStaff(startSeg, endSeg, staffIdx) {
+        if (!curScore || !curScore.selection || typeof curScore.selection.selectRange !== "function")
+            return false
+        if (!startSeg || !endSeg)
+            return false
+
+        try {
+            // endStaff is exclusive: staffIdx..staffIdx+1 selects one staff
+            curScore.selection.selectRange(startSeg, endSeg, staffIdx, staffIdx + 1)
+            return true
+        } catch (e) {
+            Log.error(tag, "selectRangeForStaff failed: " + String(e))
+            return false
+        }
+    }
+
+    function __collectChordsInTickRangeForStaff(staffIdx, startTick, endTick) {
+        var out = []
+        if (!curScore) return out
+
+        var st = Number(startTick || 0)
+        var et = Number(endTick || st)
+
+        if (et < st) {
+            var tmp = st
+            st = et
+            et = tmp
+        }
+
+        var c = curScore.newCursor()
+        if (!c) return out
+
+        c.track = staffBaseTrack(staffIdx)
+
+        if (!__seekCursorToTick(c, st)) return out
+
+        var guard = 0
+        while (c.segment && c.segment.tick !== undefined && c.segment.tick < et && guard < 200000) {
+          var el = c.element
+          if (el && el.notes && el.notes.length) {
+            out.push(el)
+          }
+          c.next()
+          guard++
+        }
+        return out
+    }
+
+    function __getTieBack(note) {
+        try { if (note && note.tieBack) return note.tieBack; } catch (e) {}
+        try { if (note && note.tieBackward) return note.tieBackward; } catch (e2) {}
+        return null;
+    }
+
+    function __getTieForward(note) {
+        try { if (note && note.tieForward) return note.tieForward; } catch (e) {}
+        try { if (note && note.tieFor) return note.tieFor; } catch (e2) {}
+        return null;
+    }
+
+    function __getTieStartNoteFromTieBack(tieBack) {
+        if (!tieBack) return null;
+        try { if (tieBack.startNote) return tieBack.startNote; } catch (e) {}
+        try { if (tieBack.start) return tieBack.start; } catch (e2) {}
+        try { if (tieBack.noteStart) return tieBack.noteStart; } catch (e3) {}
+        return null;
+    }
+
+    function __getTieEndNoteFromTieForward(tieForward) {
+        if (!tieForward) return null;
+        try { if (tieForward.endNote) return tieForward.endNote; } catch (e) {}
+        try { if (tieForward.end) return tieForward.end; } catch (e2) {}
+        try { if (tieForward.noteEnd) return tieForward.noteEnd; } catch (e3) {}
+        return null;
+    }
+
+    function __findTieStartRowObj(tieState, startNote) {
+        if (!tieState || !tieState.starts || !tieState.starts.length) return null;
+        for (var i = 0; i < tieState.starts.length; ++i) {
+            if (tieState.starts[i] === startNote) return tieState.rows[i];
+        }
+        return null;
+    }
+
+    function __findTieRowByTieObject(tieState, tieObj) {
+        if (!tieState || !tieState.ties || !tieState.ties.length) return -1;
+        for (var i = 0; i < tieState.ties.length; ++i) {
+            if (tieState.ties[i] === tieObj) return i;
+        }
+        return -1;
+    }
+
+
+    function __preparePasteCursorAtTick(staffIdx, startSegTick) {
+        if (!curScore) return null
+
+        var cursor = curScore.newCursor()
+        if (!cursor) return null
+
+        cursor.track = staffBaseTrack(staffIdx)
+        cursor.rewindToTick(startSegTick)
+
+        if (cursor.tick > startSegTick) {
+            cursor.prev()
+            cursor.setDuration(1, 4)
+            cursor.addRest()
+            cursor.rewindToTick(startSegTick)
+        }
+
+        while (cursor.tick > startSegTick) {
+            cursor.prev()
+            if (!cursor.element || !cursor.element.duration) break
+            var n = cursor.element.duration.numerator
+            var d = cursor.element.duration.denominator
+            cursor.setDuration(n, d * 2)
+            cursor.addRest()
+            cursor.rewindToTick(startSegTick)
+        }
+
+        return cursor
+    }
+
+    function __selectCursorElementForPaste(cursor) {
+        if (!curScore || !cursor || !cursor.element) return false
+
+        if (cursor.element.type === Element.CHORD) {
+            if (cursor.element.notes && cursor.element.notes.length) {
+                curScore.selection.select(cursor.element.notes[0])
+                return true
+            }
+            return false
+        } else {
+            curScore.selection.select(cursor.element)
+            return true
+        }
+    }
+
+    function __mapRowToNoteIndex(rowIndex, noteCount) {
+        if (noteCount <= 1) return 0
+
+        // rowIndex: 0..7 (Top..Bottom labels)
+        // fromBottom: Bottom row (7) => 0, Second row (6) => 1, ..., Top row (0) => 7
+        var fromBottom = 7 - rowIndex
+
+        // notes are sorted high→low, so bottom is index (noteCount - 1)
+        var ix = (noteCount - 1) - fromBottom
+
+        // clamp into valid chord note indices
+        if (ix < 0) ix = 0
+        if (ix > noteCount - 1) ix = noteCount - 1
+        return ix
+    }
+
+
+    function __applyRowsToChord(chord, rows, tieState) {
+        if (!chord || !chord.notes || !chord.notes.length || !rows || !rows.length)
+            return
+
+        var chordTick = "?"
+        try {
+            chordTick = (chord.segment && chord.segment.tick !== undefined)
+                    ? String(chord.segment.tick)
+                    : (chord.tick !== undefined ? String(chord.tick) : "?")
+        } catch (e0) {}
+
+        // Sort notes high→low (row 0 conceptually maps to "top" before mapping)
+        var notes = chord.notes.slice(0).sort(function(a, b) {
+          var pa = (a && a.pitch !== undefined) ? a.pitch : 0;
+          var pb = (b && b.pitch !== undefined) ? b.pitch : 0;
+          if (pb !== pa) return pb - pa;
+
+          // Same pitch: prefer NON-tie continuations first
+          // so Top note picks the musical note, not the tie-back continuation
+          var aTie = !!__getTieBack(a);
+          var bTie = !!__getTieBack(b);
+          if (aTie !== bTie) return (aTie ? 1 : -1);
+
+          return 0;
+        })
+
+        // Decide which notes to keep using mapping (rows 0..7 -> chord note indices 0..noteCount-1)
+        var noteCount = notes.length
+
+        // --- Single-note semantic: treat single notes as TOP notes ---
+        // If the staff/preset does NOT include Top note (row 0), then a single-note chord
+        // should become a rest (i.e., delete the note).
+        if (noteCount === 1) {
+          var topActive = !!(rows && rows[0] && rows[0].active);
+
+          if (!topActive) {
+            // No Top row configured -> delete the single note so a rest remains
+            Log.debug(tag, "singleNoteAsTop -> REST chordTick=" + chordTick +
+                           " pitch=" + (notes[0] && notes[0].pitch !== undefined ? notes[0].pitch : "?"));
+
+            try {
+              curScore.selection.select(notes[0]);
+              __doDelete();
+            } catch (eSN) {
+              Log.error(tag, "singleNoteAsTop delete failed: " + String(eSN));
+            }
+
+            // Nothing else to do on this chord
+            return;
+          }
+
+          // Top row IS active -> force mapping to the only note as Top row
+          // (continue with the normal pipeline, but ensure only Top is considered active here)
+        }
+
+        // Map: noteIndex -> rowObj (settings) for notes we keep
+        var keepMap = {}
+        var keepIndices = {} // set of indices we keep
+
+        for (var r = 0; r < 8; ++r) {
+            var ro = rows[r]
+            if (!ro || !ro.active) continue
+
+            var ni = __mapRowToNoteIndex(r, noteCount)
+            keepIndices[ni] = true
+
+            // If multiple active rows map to the same noteIndex, keep the first one (stable)
+            if (!keepMap.hasOwnProperty(ni)) keepMap[ni] = { rowObj: ro, rowIndex: r }
+        }
+
+        var keepIdxKeys = Object.keys(keepIndices)
+        if (keepIdxKeys.length === 0) {
+            Log.warn(tag, "applyRows chordTick=" + chordTick + " keepCount=0 (no active rows mapped) - skipping chord")
+            return
+        }
+
+        // Build explicit keep/delete NOTE OBJECT lists (stable references)
+        var keepNotes = []
+        var deleteNotes = []
+        for (var i = 0; i < noteCount; ++i) {
+            if (keepIndices[i]) keepNotes.push({
+                                                   note: notes[i],
+                                                   rowObj: keepMap[i] ? keepMap[i].rowObj : null,
+                                                   rowIndex: keepMap[i] ? keepMap[i].rowIndex : -1
+                                               })
+            else deleteNotes.push(notes[i])
+        }
+
+        Log.debug(tag, "prunePlan chordTick=" + chordTick +
+                  " keepCount=" + keepNotes.length +
+                  " deleteCount=" + deleteNotes.length)
+
+        try {
+            var kp = [], dp = [];
+            for (var kk = 0; kk < keepNotes.length; ++kk) kp.push(keepNotes[kk].note.pitch);
+            for (var dd = 0; dd < deleteNotes.length; ++dd) dp.push(deleteNotes[dd].pitch);
+            Log.debug(tag, "keepDelete chordTick=" + chordTick + " keep=" + JSON.stringify(kp) + " del=" + JSON.stringify(dp));
+        } catch (eKD) {}
+
+        // --- Tie continuation override (match by tie object; replace the mapped row note) ---
+        for (var iT = 0; iT < deleteNotes.length; ++iT) {
+            var dn0 = deleteNotes[iT];
+            var tb = __getTieBack(dn0);
+            if (!tb) continue;
+
+            var j = __findTieRowByTieObject(tieState, tb);
+            if (j < 0) continue; // tie not tracked as kept on prior chord
+
+            var desiredRowIdx = tieState.rowIdx[j];
+            var rowObjFromTie = tieState.rows[j];
+
+            // Remove dn0 from delete list
+            deleteNotes.splice(iT, 1);
+            --iT;
+
+            // If we already kept a note for that row, evict it to delete (unless it's the same note)
+            for (var kk = 0; kk < keepNotes.length; ++kk) {
+                if (keepNotes[kk].rowIndex === desiredRowIdx && keepNotes[kk].note !== dn0) {
+                    deleteNotes.push(keepNotes[kk].note);
+                    keepNotes.splice(kk, 1);
+                    break;
+                }
+            }
+
+            // Insert dn0 as the kept note for that row
+            keepNotes.push({ note: dn0, rowObj: rowObjFromTie, rowIndex: desiredRowIdx });
+
+            Log.debug(tag, "tieOverride REPLACE chordTick=" + chordTick +
+                      " pitch=" + (dn0.pitch !== undefined ? dn0.pitch : "?") +
+                      " rowIdx=" + desiredRowIdx);
+        }
+
+        // --- Tie continuation fallback #2: match by continuation pitch (robust when endNote identity differs) ---
+        if (tieState && tieState.contPitches && tieState.contPitches.length) {
+          for (var iT3 = 0; iT3 < deleteNotes.length; ++iT3) {
+            var dn2 = deleteNotes[iT3];
+            var dnPitch = (dn2 && dn2.pitch !== undefined) ? dn2.pitch : null;
+            if (dnPitch === null) continue;
+
+            // Find a tracked tie continuation pitch match
+            var j3 = -1;
+            for (var q3 = 0; q3 < tieState.contPitches.length; ++q3) {
+              if (tieState.contPitches[q3] !== null && tieState.contPitches[q3] === dnPitch) { j3 = q3; break; }
+            }
+            if (j3 < 0) continue;
+
+            var desiredRowIdx3 = tieState.rowIdx[j3];
+            var rowObjFromTie3 = tieState.rows[j3];
+
+            // Remove dn2 from delete list
+            deleteNotes.splice(iT3, 1);
+            --iT3;
+
+            // Evict any currently-kept note assigned to that row
+            for (var kk3 = 0; kk3 < keepNotes.length; ++kk3) {
+              if (keepNotes[kk3].rowIndex === desiredRowIdx3 && keepNotes[kk3].note !== dn2) {
+                deleteNotes.push(keepNotes[kk3].note);
+                keepNotes.splice(kk3, 1);
+                break;
+              }
+            }
+
+            // Insert dn2 as the kept note for that row
+            keepNotes.push({ note: dn2, rowObj: rowObjFromTie3, rowIndex: desiredRowIdx3 });
+
+            // Mark this tie entry as consumed so it doesn't keep matching later chords
+            tieState.contPitches[j3] = null;
+            tieState.ends[j3] = null;
+            tieState.ties[j3] = null;
+
+            Log.debug(tag, "tieOverride CONTPITCH chordTick=" + chordTick +
+                           " pitch=" + dnPitch +
+                           " rowIdx=" + desiredRowIdx3);
+          }
+        }
+
+        // --- Tie continuation row-lock for KEPT notes ---
+        // If a tie continuation note is already in keepNotes, it may have become the highest pitch
+        // (because transposing the tie start propagates through the chain). That can cause the mapping
+        // to incorrectly assign the continuation note to the Top row. We force it back onto the row
+        // it originally belonged to (tracked in tieState.rowIdx via contPitches).
+        (function () {
+          try {
+            if (!(tieState && tieState.contPitches && tieState.contPitches.length)) return;
+
+            for (var kT = 0; kT < keepNotes.length; ++kT) {
+              var nT = keepNotes[kT].note;
+              if (!__getTieBack(nT)) continue; // only continuations
+
+              var pT = (nT && nT.pitch !== undefined) ? nT.pitch : null;
+              if (pT === null) continue;
+
+              // Find which tracked tie this continuation pitch belongs to
+              var jT = -1;
+              for (var qT = 0; qT < tieState.contPitches.length; ++qT) {
+                if (tieState.contPitches[qT] !== null && tieState.contPitches[qT] === pT) { jT = qT; break; }
+              }
+              if (jT < 0) continue;
+
+              var desiredRow = tieState.rowIdx[jT];
+              var desiredRowObj = tieState.rows[jT];
+
+              // If another kept note is currently assigned to that desired row, evict it to delete
+              for (var kkT = 0; kkT < keepNotes.length; ++kkT) {
+                if (kkT === kT) continue;
+                if (keepNotes[kkT].rowIndex === desiredRow && keepNotes[kkT].note !== nT) {
+                  deleteNotes.push(keepNotes[kkT].note);
+                  keepNotes.splice(kkT, 1);
+                  if (kkT < kT) --kT; // keep index stable
+                  break;
+                }
+              }
+
+              // Force the continuation note onto its original row
+              keepNotes[kT].rowIndex = desiredRow;
+              keepNotes[kT].rowObj = desiredRowObj;
+
+              Log.debug(tag, "tieLock KEEP chordTick=" + chordTick +
+                             " pitch=" + pT +
+                             " rowIdx=" + desiredRow);
+            }
+          } catch (eTL) {}
+        })();
+
+        // --- Rebalance non-tied rows when a tie-continuation note is being kept ---
+        // This prevents a non-tied row (e.g. "Second note") from sliding to the wrong pitch
+        // when the tie continuation changes pitch-order in the chord (your E instead of A case).
+        (function () {
+            try {
+                // 1) Identify kept notes that are tie continuations (tieBack present)
+                var locked = [];
+                for (var iL = 0; iL < keepNotes.length; ++iL) {
+                    var nL = keepNotes[iL].note;
+                    if (__getTieBack(nL)) {
+                        locked.push(keepNotes[iL]); // keep existing rowIndex/rowObj for the tie row
+                    }
+                }
+                if (!locked.length) return; // nothing to rebalance
+
+                // Helpers
+                function isLockedNote(n) {
+                    for (var z = 0; z < locked.length; ++z) {
+                        if (locked[z].note === n) return true;
+                    }
+                    return false;
+                }
+                function isKeptIn(list, n) {
+                    for (var z2 = 0; z2 < list.length; ++z2) {
+                        if (list[z2].note === n) return true;
+                    }
+                    return false;
+                }
+                function rowIsLocked(rowIndex) {
+                    for (var z3 = 0; z3 < locked.length; ++z3) {
+                        if (locked[z3].rowIndex === rowIndex) return true;
+                    }
+                    return false;
+                }
+
+                // 2) Remaining notes exclude locked continuation notes
+                var remaining = [];
+                for (var rr = 0; rr < notes.length; ++rr) {
+                    if (!isLockedNote(notes[rr])) remaining.push(notes[rr]);
+                }
+                if (!remaining.length) return;
+
+                // 3) Start new keep list with the locked continuation rows
+                var newKeep = [];
+                for (var lk = 0; lk < locked.length; ++lk) newKeep.push(locked[lk]);
+
+                // 4) For each active row that isn't locked, choose from remaining using the same row mapping
+                for (var rowI = 0; rowI < 8; ++rowI) {
+                    if (!rows[rowI] || !rows[rowI].active) continue;
+                    if (rowIsLocked(rowI)) continue;
+
+                    var ni2 = __mapRowToNoteIndex(rowI, remaining.length);
+                    var target = remaining[ni2];
+                    if (!target) continue;
+
+                    // Avoid duplicates
+                    if (isKeptIn(newKeep, target)) continue;
+
+                    newKeep.push({ note: target, rowObj: rows[rowI], rowIndex: rowI });
+                }
+
+                // 5) Replace keepNotes and rebuild deleteNotes accordingly
+                keepNotes = newKeep;
+
+                var newDelete = [];
+                for (var dd2 = 0; dd2 < notes.length; ++dd2) {
+                    var cand = notes[dd2];
+                    if (!isKeptIn(keepNotes, cand)) newDelete.push(cand);
+                }
+                deleteNotes = newDelete;
+
+                // Debug (optional): final keep/delete after rebalance
+                try {
+                    var kp2 = [], dp2 = [];
+                    for (var a = 0; a < keepNotes.length; ++a) kp2.push(keepNotes[a].note.pitch);
+                    for (var b = 0; b < deleteNotes.length; ++b) dp2.push(deleteNotes[b].pitch);
+                    Log.debug(tag, "rebalance chordTick=" + chordTick +
+                                   " keep=" + JSON.stringify(kp2) +
+                                   " del=" + JSON.stringify(dp2));
+                } catch (eDbg) {}
+            } catch (eReb) {}
+        })();
+
+        // 1) Apply pitch + voice to kept notes FIRST (prevents index drift)
+        for (var k = 0; k < keepNotes.length; ++k) {
+            var kn = keepNotes[k].note
+            var rowObjK = keepNotes[k].rowObj || { voice: 1, offset: 0 }
+
+            try { curScore.selection.select(kn) } catch (eSel) { continue }
+
+            var tbK = __getTieBack(kn);
+            if (tbK) {
+              // This note is a continuation of a tie. Its pitch likely already followed the start note.
+              // Skipping avoids double-transpose (+24 bug) and avoids breaking the tie by re-editing it.
+              Log.debug(tag, "tieSkip APPLY chordTick=" + chordTick +
+                             " pitch=" + (kn.pitch !== undefined ? kn.pitch : "?"));
+
+              // NEW: consume the tracked tie entry so it can't hijack later chords by matching contPitch again.
+              try {
+                if (tieState) {
+                  var consumed = false;
+
+                  // Prefer consuming by tie object identity (tieBack is typically the same tie object).
+                  var jC = __findTieRowByTieObject(tieState, tbK);
+                  if (jC >= 0) {
+                    tieState.contPitches[jC] = null;
+                    tieState.ends[jC] = null;
+                    tieState.ties[jC] = null;
+                    consumed = true;
+                    Log.debug(tag, "tieConsume BYOBJ chordTick=" + chordTick +
+                                   " pitch=" + (kn.pitch !== undefined ? kn.pitch : "?") +
+                                   " idx=" + jC);
+                  }
+
+                  // Fallback: if identity didn't match, consume by pitch BUT ONLY because tbK confirms it's a real continuation.
+                  if (!consumed && tieState.contPitches && tieState.contPitches.length && kn && kn.pitch !== undefined) {
+                    for (var qC = 0; qC < tieState.contPitches.length; ++qC) {
+                      if (tieState.contPitches[qC] !== null && tieState.contPitches[qC] === kn.pitch) {
+                        tieState.contPitches[qC] = null;
+                        tieState.ends[qC] = null;
+                        tieState.ties[qC] = null;
+                        Log.debug(tag, "tieConsume BYPITCH chordTick=" + chordTick +
+                                       " pitch=" + kn.pitch +
+                                       " idx=" + qC);
+                        break;
+                      }
+                    }
+                  }
+                }
+              } catch (eTC) {}
+
+              continue;
+            }
+
+            Log.debug(tag, "applyNote chordTick=" + chordTick +
+                      " pitch=" + (kn.pitch !== undefined ? kn.pitch : "?") +
+                      " voice=" + (rowObjK.voice !== undefined ? rowObjK.voice : "?") +
+                      " offset=" + (rowObjK.offset !== undefined ? rowObjK.offset : "?"))
+
+            if (rowObjK.voice !== undefined) __setVoice(rowObjK.voice)
+
+            var deltaK = Number(rowObjK.offset ?? 0)
+            if (deltaK !== 0) {
+                var stepsK = deltaK
+                while (stepsK >= 12) { __pitchUpOctave(); stepsK -= 12 }
+                while (stepsK <= -12) { __pitchDownOctave(); stepsK += 12 }
+                while (stepsK > 0) { __pitchUp(); stepsK -= 1 }
+                while (stepsK < 0) { __pitchDown(); stepsK += 1 }
+            }
+
+            // If this note starts a tie forward, remember it (so we can keep its continuation later)
+            var tfK = __getTieForward(kn);
+            if (tfK && tieState) {
+              tieState.ties.push(tfK);
+              tieState.rows.push(rowObjK);
+              tieState.rowIdx.push(keepNotes[k].rowIndex);
+
+              // store end note identity too, if we can get it
+              var endN = __getTieEndNoteFromTieForward(tfK);
+              tieState.ends.push(endN);
+
+              // NEW: store expected continuation pitch (use endN.pitch if available, else the start pitch)
+              var contPitch = (endN && endN.pitch !== undefined) ? endN.pitch
+                             : (kn && kn.pitch !== undefined) ? kn.pitch
+                             : null;
+              tieState.contPitches.push(contPitch);
+
+              Log.debug(tag, "tieTrack START chordTick=" + chordTick +
+                             " pitch=" + (kn.pitch !== undefined ? kn.pitch : "?") +
+                             " rowIdx=" + keepNotes[k].rowIndex +
+                             " endNote=" + (endN ? (endN.pitch !== undefined ? endN.pitch : "?") : "null") +
+                             " contPitch=" + (contPitch !== null ? contPitch : "null"));
+            }
+            try { if (curScore.selection && curScore.selection.clear) curScore.selection.clear() } catch (eClr) {}
+        }
+
+        // 2) Now delete unwanted notes (safe one-by-one)
+        for (var d = 0; d < deleteNotes.length; ++d) {
+            var dn = deleteNotes[d]
+            try {
+                curScore.selection.select(dn)
+                __doDelete()
+            } catch (eDel) {
+                Log.error(tag, "__applyRowsToChord delete failed: " + String(eDel))
+            }
+        }
+    }
+
+    // Public entry point: fire preset by index (normal-mode card click)
+    function firePreset(presetIndex) {
+        if (!curScore) {
+            Log.error(tag, "firePreset: no curScore")
+            return
+        }
+
+        if (presetIndex < 0 || presetIndex >= presets.length) {
+            Log.error(tag, "firePreset: invalid preset index " + presetIndex)
+            return
+        }
+
+        var p = presets[presetIndex]
+        if (!p || !p.noteRowsByStaff) {
+            Log.warn(tag, "firePreset: preset has no noteRowsByStaff")
+            return
+        }
+
+        var segs = __getSourceSelectionSegments()
+        var startSeg = segs.start
+        var endSeg = segs.end
+
+        if (!startSeg) {
+            Log.warn(tag, "firePreset: no selection (select something on the sketch staff first)")
+            return
+        }
+
+        var startTick = (startSeg.tick !== undefined) ? startSeg.tick : 0
+        var endTick = (endSeg && endSeg.tick !== undefined) ? endSeg.tick : startTick
+
+        var targetStaffIds = __staffIdsWithAnyActive(p)
+
+
+        Log.info(tag, "firePreset startTick=" + startTick + " endTick=" + endTick +
+                 " targetStaffIds=" + JSON.stringify(targetStaffIds))
+        Log.debug(tag, "firePreset initialSelection " + __dbgSelection())
+
+        if (!targetStaffIds.length) {
+            Log.warn(tag, "firePreset: preset is empty (no active note rows)")
+            return
+        }
+
+        curScore.startCmd()
+
+        try {
+            __doCopy()
+
+            var startSegTick = startSeg.tick
+
+            for (var t = 0; t < targetStaffIds.length; ++t) {
+                var staffIdx = targetStaffIds[t]
+
+                Log.info(tag, "staffPass staffIdx=" + staffIdx +
+                         " track=" + staffBaseTrack(staffIdx) +
+                         " startSegTick=" + startSegTick +
+                         " startTick=" + startTick + " endTick=" + endTick)
+
+                var rows = p.noteRowsByStaff[staffIdx]
+
+                // Tie tracking: tie object identity is stable across segments
+                var tieState = { ties: [], rows: [], rowIdx: [], ends: [], contPitches: [] };
+
+                if (!rows || !hasAnyActiveRows(rows))
+                    continue
+
+                var dc = __preparePasteCursorAtTick(staffIdx, startSegTick)
+
+                try {
+                    Log.debug(tag, "destination cursor (dc) after prepare tick=" + dc.tick +
+                              " track=" + dc.track +
+                              " element=" + __dbgElement(dc.element) +
+                              " sel=" + __dbgSelection())
+                } catch (eDc) {
+                    Log.error(tag, "dc debug failed: " + String(eDc))
+                }
+
+                if (!dc) {
+                    Log.error(tag, "firePreset: could not prepare destination cursor for staff " + staffIdx)
+                    continue
+                }
+
+                if (!__selectCursorElementForPaste(dc)) {
+                    Log.error(tag, "firePreset: could not select destination element for staff " + staffIdx)
+                    continue
+                }
+
+                Log.debug(tag, "aboutToPaste staffIdx=" + staffIdx + " sel=" + __dbgSelection())
+
+                __doPaste()
+
+                Log.debug(tag, "afterPaste staffIdx=" + staffIdx + " sel=" + __dbgSelection())
+
+                __escape()        // collapse any range selection / exit write mode
+                // __escape()        // (optional) some builds need 2 to fully exit note entry
+
+
+                var chords = __collectChordsInTickRangeForStaff(staffIdx, startTick, endTick)
+
+                Log.info(tag, "collectedChords staffIdx=" + staffIdx + " count=" + chords.length)
+                for (var i = 0; i < Math.min(chords.length, 12); ++i) {
+                    var ch = chords[i]
+                    var ct = "?"
+                    try { ct = (ch.segment && ch.segment.tick !== undefined) ? ch.segment.tick : (ch.tick !== undefined ? ch.tick : "?") } catch(eT) {}
+                    var pitches = []
+                    try {
+                        for (var n = 0; n < (ch.notes ? ch.notes.length : 0); ++n) pitches.push(ch.notes[n].pitch)
+                    } catch(eP) {}
+                    Log.debug(tag, "chord[" + i + "] tick=" + ct + " pitches=" + JSON.stringify(pitches))
+                }
+
+                for (var c = 0; c < chords.length; ++c) {
+                    __applyRowsToChord(chords[c], rows, tieState)
+                }
+            }
+
+        } catch (e) {
+            Log.error(tag, "firePreset exception: " + String(e))
+        }
+
+        curScore.endCmd()
     }
 
     // Model: { idx, name }
@@ -1556,6 +2371,7 @@ MuseScore {
                                             if (!root.settingsOpen) {
                                                 // trigger-only, no selection persistence
                                                 rootUI.selectedIndex = -1
+                                                root.firePreset(model.index)
                                             }
                                         }
                                     }
