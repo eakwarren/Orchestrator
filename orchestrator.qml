@@ -787,6 +787,12 @@ MuseScore {
     function __doPaste()  { cmd("action://paste") }
     function __doDelete() { cmd("action://delete") }
     function __escape()   { cmd("escape") } //action://notation/cancel
+    function __clearScoreSelection() {
+        try {
+            if (curScore && curScore.selection && typeof curScore.selection.clear === "function")
+                curScore.selection.clear();
+        } catch (e) {}
+    }
 
     function __pitchUp()         { cmd("pitch-up") }
     function __pitchDown()       { cmd("pitch-down") }
@@ -1470,6 +1476,9 @@ MuseScore {
                 Log.error(tag, "__applyRowsToChord delete failed: " + String(eDel))
             }
         }
+
+        // Ensure we don't leave the last deleted/selected note highlighted
+        __clearScoreSelection();
     }
 
     // Public entry point: fire preset by index (normal-mode card click)
@@ -1585,6 +1594,9 @@ MuseScore {
                 for (var c = 0; c < chords.length; ++c) {
                     __applyRowsToChord(chords[c], rows, tieState)
                 }
+
+                __clearScoreSelection()
+                __escape()
             }
 
         } catch (e) {
@@ -3250,7 +3262,7 @@ MuseScore {
                             root.scheduleLiveCommit()
                         }
                         // ---- Voice selection state (one voice per row; independent per row) ----
-                        // Map: row index -> 1|2|3|4 (selected voice), or undefined for none
+                        // Map: row index -> 0|1|2|3 (selected voice), or undefined for none
                         property var voiceByRow: ({})
                         property var pitchIndexByRow: ({})
 
@@ -3264,7 +3276,7 @@ MuseScore {
                             // Live-commit after voice change
                             root.scheduleLiveCommit()
                         }
-                        // Default every row to Voice 1 so it appears active initially
+                        // Default every row to Voice 0 (1 in UI) so it appears active initially
                         // Map: row index -> dropdown index (0..48), 24 = "--" (0 semitones)
                         Component.onCompleted: {
                             var m = {}
