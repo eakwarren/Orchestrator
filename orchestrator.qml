@@ -27,7 +27,7 @@ MuseScore {
     title: qsTr("Orchestrator")
     description: qsTr("Quickly orchestrate sketches")
     thumbnailName: "orchestrator.png"
-    version: "0.2.1"
+    version: "0.2.2"
 
     categoryCode: qsTr("Composing/arranging tools")
 
@@ -83,7 +83,8 @@ MuseScore {
     }
 
     // In-memory presets array
-    // Schema: [{ id, name, staves:[int...], rows:[{active:bool, voice:1..4, offset:-24..24} x8] }, ...]
+    // Schema: [{ id, name, staves:[int...], rows:[{active:bool, voice:0..3, offset:-24..24} x8] }, ...]
+    // Note: voice is API-native: 0..3 (Cursor.voice is #track % 4)
     property var presets: ([])
     property bool suppressApplyPreset: false
     property bool creatingNewPreset: false
@@ -165,7 +166,7 @@ MuseScore {
     function defaultRows() {
         var rows = []
         for (var i = 0; i < 8; ++i)
-            rows.push({ active: false, offset: 0, voice: 1 })
+            rows.push({ active: false, offset: 0, voice: 0 })
         return rows
     }
 
@@ -281,11 +282,11 @@ MuseScore {
     function __deepCloneRowsArray(rows) {
         var out = [];
         for (var i = 0; i < 8; ++i) {
-            var r = (rows && rows[i]) ? rows[i] : { active: false, offset: 0, voice: 1 };
+            var r = (rows && rows[i]) ? rows[i] : { active: false, offset: 0, voice: 0 };
             out.push({
                          active: !!r.active,
                          offset: Number(r.offset || 0),
-                         voice: Number(r.voice || 1)
+                         voice: Number(r.voice || 0)
                      });
         }
         return out;
@@ -549,7 +550,7 @@ MuseScore {
             var rows = [];
             for (var i = 0; i < 8; ++i) {
                 var active  = nb ? !!nb.selectedNotes[i] : false;
-                var voice   = Number(nb && nb.voiceByRow ? (nb.voiceByRow[i] ?? 1) : 1);
+                var voice   = Number(nb && nb.voiceByRow ? (nb.voiceByRow[i] ?? 0) : 0);
                 var pitchIx = (nb && nb.pitchIndexByRow && nb.pitchIndexByRow[i] !== undefined) ? nb.pitchIndexByRow[i] : 24;
                 var offset  = pitchIndexToValue(pitchIx);
                 rows.push({ active: active, offset: offset, voice: voice });
@@ -564,7 +565,7 @@ MuseScore {
         var rows = [];
         for (var i = 0; i < 8; ++i) {
             var active  = nb ? !!nb.selectedNotes[i] : false;
-            var voice   = Number(nb && nb.voiceByRow ? (nb.voiceByRow[i] ?? 1) : 1);
+            var voice   = Number(nb && nb.voiceByRow ? (nb.voiceByRow[i] ?? 0) : 0);
             var pitchIx = (nb && nb.pitchIndexByRow && nb.pitchIndexByRow[i] !== undefined) ? nb.pitchIndexByRow[i] : 24;
             var offset  = pitchIndexToValue(pitchIx);
             rows.push({ active: active, offset: offset, voice: voice });
@@ -584,9 +585,9 @@ MuseScore {
             // 1) Clear selection flags
             nb.selectedNotes = ({});
 
-            // 2) Reset voices: default each row to voice 1
+            // 2) Reset voices: default each row to voice 0
             var vb = {};
-            for (var i = 0; i < 8; ++i) vb[i] = 1;
+            for (var i = 0; i < 8; ++i) vb[i] = 0;
             nb.voiceByRow = vb;
 
             // 3) Reset pitch indices to center (24 == 0 semitones)
@@ -708,9 +709,9 @@ MuseScore {
 
             var vb = {}, pi = {};
             for (var i = 0; i < 8; ++i) {
-                var row = rowsForStaff[i] ?? { active:false, offset:0, voice:1 };
+                var row = rowsForStaff[i] ?? { active:false, offset:0, voice:0 };
                 if (row.active) nb.setNoteSelected(i, true)
-                vb[i] = (row.voice >= 1 && row.voice <= 4) ? row.voice : 1
+                vb[i] = (row.voice >= 0 && row.voice <= 3) ? row.voice : 0
                 pi[i] = pitchValueToIndex(row.offset ?? 0)
             }
             nb.voiceByRow = vb
@@ -793,10 +794,12 @@ MuseScore {
     function __pitchDownOctave() { cmd("pitch-down-octave") }
 
     function __setVoice(v) {
-        var vv = Number(v || 1)
-        if (vv < 1) vv = 1
-        if (vv > 4) vv = 4
-        cmd("voice-" + vv)
+        // API-native voice index: 0..3 (#track % 4)
+        var vv = Number(v ?? 0)
+        if (vv < 0) vv = 0
+        if (vv > 3) vv = 3
+        // command names are voice-1..voice-4, so convert 0..3 -> 1..4
+        cmd("voice-" + (vv + 1))
     }
 
     function __dbgElement(el) {
@@ -941,12 +944,12 @@ MuseScore {
 
         var guard = 0
         while (c.segment && c.segment.tick !== undefined && c.segment.tick < et && guard < 200000) {
-          var el = c.element
-          if (el && el.notes && el.notes.length) {
-            out.push(el)
-          }
-          c.next()
-          guard++
+            var el = c.element
+            if (el && el.notes && el.notes.length) {
+                out.push(el)
+            }
+            c.next()
+            guard++
         }
         return out
     }
@@ -1070,17 +1073,17 @@ MuseScore {
 
         // Sort notes high→low (row 0 conceptually maps to "top" before mapping)
         var notes = chord.notes.slice(0).sort(function(a, b) {
-          var pa = (a && a.pitch !== undefined) ? a.pitch : 0;
-          var pb = (b && b.pitch !== undefined) ? b.pitch : 0;
-          if (pb !== pa) return pb - pa;
+            var pa = (a && a.pitch !== undefined) ? a.pitch : 0;
+            var pb = (b && b.pitch !== undefined) ? b.pitch : 0;
+            if (pb !== pa) return pb - pa;
 
-          // Same pitch: prefer NON-tie continuations first
-          // so Top note picks the musical note, not the tie-back continuation
-          var aTie = !!__getTieBack(a);
-          var bTie = !!__getTieBack(b);
-          if (aTie !== bTie) return (aTie ? 1 : -1);
+            // Same pitch: prefer NON-tie continuations first
+            // so Top note picks the musical note, not the tie-back continuation
+            var aTie = !!__getTieBack(a);
+            var bTie = !!__getTieBack(b);
+            if (aTie !== bTie) return (aTie ? 1 : -1);
 
-          return 0;
+            return 0;
         })
 
         // Decide which notes to keep using mapping (rows 0..7 -> chord note indices 0..noteCount-1)
@@ -1090,26 +1093,26 @@ MuseScore {
         // If the staff/preset does NOT include Top note (row 0), then a single-note chord
         // should become a rest (i.e., delete the note).
         if (noteCount === 1) {
-          var topActive = !!(rows && rows[0] && rows[0].active);
+            var topActive = !!(rows && rows[0] && rows[0].active);
 
-          if (!topActive) {
-            // No Top row configured -> delete the single note so a rest remains
-            Log.debug(tag, "singleNoteAsTop -> REST chordTick=" + chordTick +
-                           " pitch=" + (notes[0] && notes[0].pitch !== undefined ? notes[0].pitch : "?"));
+            if (!topActive) {
+                // No Top row configured -> delete the single note so a rest remains
+                Log.debug(tag, "singleNoteAsTop -> REST chordTick=" + chordTick +
+                          " pitch=" + (notes[0] && notes[0].pitch !== undefined ? notes[0].pitch : "?"));
 
-            try {
-              curScore.selection.select(notes[0]);
-              __doDelete();
-            } catch (eSN) {
-              Log.error(tag, "singleNoteAsTop delete failed: " + String(eSN));
+                try {
+                    curScore.selection.select(notes[0]);
+                    __doDelete();
+                } catch (eSN) {
+                    Log.error(tag, "singleNoteAsTop delete failed: " + String(eSN));
+                }
+
+                // Nothing else to do on this chord
+                return;
             }
 
-            // Nothing else to do on this chord
-            return;
-          }
-
-          // Top row IS active -> force mapping to the only note as Top row
-          // (continue with the normal pipeline, but ensure only Top is considered active here)
+            // Top row IS active -> force mapping to the only note as Top row
+            // (continue with the normal pipeline, but ensure only Top is considered active here)
         }
 
         // Map: noteIndex -> rowObj (settings) for notes we keep
@@ -1191,46 +1194,46 @@ MuseScore {
 
         // --- Tie continuation fallback #2: match by continuation pitch (robust when endNote identity differs) ---
         if (tieState && tieState.contPitches && tieState.contPitches.length) {
-          for (var iT3 = 0; iT3 < deleteNotes.length; ++iT3) {
-            var dn2 = deleteNotes[iT3];
-            var dnPitch = (dn2 && dn2.pitch !== undefined) ? dn2.pitch : null;
-            if (dnPitch === null) continue;
+            for (var iT3 = 0; iT3 < deleteNotes.length; ++iT3) {
+                var dn2 = deleteNotes[iT3];
+                var dnPitch = (dn2 && dn2.pitch !== undefined) ? dn2.pitch : null;
+                if (dnPitch === null) continue;
 
-            // Find a tracked tie continuation pitch match
-            var j3 = -1;
-            for (var q3 = 0; q3 < tieState.contPitches.length; ++q3) {
-              if (tieState.contPitches[q3] !== null && tieState.contPitches[q3] === dnPitch) { j3 = q3; break; }
+                // Find a tracked tie continuation pitch match
+                var j3 = -1;
+                for (var q3 = 0; q3 < tieState.contPitches.length; ++q3) {
+                    if (tieState.contPitches[q3] !== null && tieState.contPitches[q3] === dnPitch) { j3 = q3; break; }
+                }
+                if (j3 < 0) continue;
+
+                var desiredRowIdx3 = tieState.rowIdx[j3];
+                var rowObjFromTie3 = tieState.rows[j3];
+
+                // Remove dn2 from delete list
+                deleteNotes.splice(iT3, 1);
+                --iT3;
+
+                // Evict any currently-kept note assigned to that row
+                for (var kk3 = 0; kk3 < keepNotes.length; ++kk3) {
+                    if (keepNotes[kk3].rowIndex === desiredRowIdx3 && keepNotes[kk3].note !== dn2) {
+                        deleteNotes.push(keepNotes[kk3].note);
+                        keepNotes.splice(kk3, 1);
+                        break;
+                    }
+                }
+
+                // Insert dn2 as the kept note for that row
+                keepNotes.push({ note: dn2, rowObj: rowObjFromTie3, rowIndex: desiredRowIdx3 });
+
+                // Mark this tie entry as consumed so it doesn't keep matching later chords
+                tieState.contPitches[j3] = null;
+                tieState.ends[j3] = null;
+                tieState.ties[j3] = null;
+
+                Log.debug(tag, "tieOverride CONTPITCH chordTick=" + chordTick +
+                          " pitch=" + dnPitch +
+                          " rowIdx=" + desiredRowIdx3);
             }
-            if (j3 < 0) continue;
-
-            var desiredRowIdx3 = tieState.rowIdx[j3];
-            var rowObjFromTie3 = tieState.rows[j3];
-
-            // Remove dn2 from delete list
-            deleteNotes.splice(iT3, 1);
-            --iT3;
-
-            // Evict any currently-kept note assigned to that row
-            for (var kk3 = 0; kk3 < keepNotes.length; ++kk3) {
-              if (keepNotes[kk3].rowIndex === desiredRowIdx3 && keepNotes[kk3].note !== dn2) {
-                deleteNotes.push(keepNotes[kk3].note);
-                keepNotes.splice(kk3, 1);
-                break;
-              }
-            }
-
-            // Insert dn2 as the kept note for that row
-            keepNotes.push({ note: dn2, rowObj: rowObjFromTie3, rowIndex: desiredRowIdx3 });
-
-            // Mark this tie entry as consumed so it doesn't keep matching later chords
-            tieState.contPitches[j3] = null;
-            tieState.ends[j3] = null;
-            tieState.ties[j3] = null;
-
-            Log.debug(tag, "tieOverride CONTPITCH chordTick=" + chordTick +
-                           " pitch=" + dnPitch +
-                           " rowIdx=" + desiredRowIdx3);
-          }
         }
 
         // --- Tie continuation row-lock for KEPT notes ---
@@ -1239,46 +1242,46 @@ MuseScore {
         // to incorrectly assign the continuation note to the Top row. We force it back onto the row
         // it originally belonged to (tracked in tieState.rowIdx via contPitches).
         (function () {
-          try {
-            if (!(tieState && tieState.contPitches && tieState.contPitches.length)) return;
+            try {
+                if (!(tieState && tieState.contPitches && tieState.contPitches.length)) return;
 
-            for (var kT = 0; kT < keepNotes.length; ++kT) {
-              var nT = keepNotes[kT].note;
-              if (!__getTieBack(nT)) continue; // only continuations
+                for (var kT = 0; kT < keepNotes.length; ++kT) {
+                    var nT = keepNotes[kT].note;
+                    if (!__getTieBack(nT)) continue; // only continuations
 
-              var pT = (nT && nT.pitch !== undefined) ? nT.pitch : null;
-              if (pT === null) continue;
+                    var pT = (nT && nT.pitch !== undefined) ? nT.pitch : null;
+                    if (pT === null) continue;
 
-              // Find which tracked tie this continuation pitch belongs to
-              var jT = -1;
-              for (var qT = 0; qT < tieState.contPitches.length; ++qT) {
-                if (tieState.contPitches[qT] !== null && tieState.contPitches[qT] === pT) { jT = qT; break; }
-              }
-              if (jT < 0) continue;
+                    // Find which tracked tie this continuation pitch belongs to
+                    var jT = -1;
+                    for (var qT = 0; qT < tieState.contPitches.length; ++qT) {
+                        if (tieState.contPitches[qT] !== null && tieState.contPitches[qT] === pT) { jT = qT; break; }
+                    }
+                    if (jT < 0) continue;
 
-              var desiredRow = tieState.rowIdx[jT];
-              var desiredRowObj = tieState.rows[jT];
+                    var desiredRow = tieState.rowIdx[jT];
+                    var desiredRowObj = tieState.rows[jT];
 
-              // If another kept note is currently assigned to that desired row, evict it to delete
-              for (var kkT = 0; kkT < keepNotes.length; ++kkT) {
-                if (kkT === kT) continue;
-                if (keepNotes[kkT].rowIndex === desiredRow && keepNotes[kkT].note !== nT) {
-                  deleteNotes.push(keepNotes[kkT].note);
-                  keepNotes.splice(kkT, 1);
-                  if (kkT < kT) --kT; // keep index stable
-                  break;
+                    // If another kept note is currently assigned to that desired row, evict it to delete
+                    for (var kkT = 0; kkT < keepNotes.length; ++kkT) {
+                        if (kkT === kT) continue;
+                        if (keepNotes[kkT].rowIndex === desiredRow && keepNotes[kkT].note !== nT) {
+                            deleteNotes.push(keepNotes[kkT].note);
+                            keepNotes.splice(kkT, 1);
+                            if (kkT < kT) --kT; // keep index stable
+                            break;
+                        }
+                    }
+
+                    // Force the continuation note onto its original row
+                    keepNotes[kT].rowIndex = desiredRow;
+                    keepNotes[kT].rowObj = desiredRowObj;
+
+                    Log.debug(tag, "tieLock KEEP chordTick=" + chordTick +
+                              " pitch=" + pT +
+                              " rowIdx=" + desiredRow);
                 }
-              }
-
-              // Force the continuation note onto its original row
-              keepNotes[kT].rowIndex = desiredRow;
-              keepNotes[kT].rowObj = desiredRowObj;
-
-              Log.debug(tag, "tieLock KEEP chordTick=" + chordTick +
-                             " pitch=" + pT +
-                             " rowIdx=" + desiredRow);
-            }
-          } catch (eTL) {}
+            } catch (eTL) {}
         })();
 
         // --- Rebalance non-tied rows when a tie-continuation note is being kept ---
@@ -1358,8 +1361,8 @@ MuseScore {
                     for (var a = 0; a < keepNotes.length; ++a) kp2.push(keepNotes[a].note.pitch);
                     for (var b = 0; b < deleteNotes.length; ++b) dp2.push(deleteNotes[b].pitch);
                     Log.debug(tag, "rebalance chordTick=" + chordTick +
-                                   " keep=" + JSON.stringify(kp2) +
-                                   " del=" + JSON.stringify(dp2));
+                              " keep=" + JSON.stringify(kp2) +
+                              " del=" + JSON.stringify(dp2));
                 } catch (eDbg) {}
             } catch (eReb) {}
         })();
@@ -1367,52 +1370,52 @@ MuseScore {
         // 1) Apply pitch + voice to kept notes FIRST (prevents index drift)
         for (var k = 0; k < keepNotes.length; ++k) {
             var kn = keepNotes[k].note
-            var rowObjK = keepNotes[k].rowObj || { voice: 1, offset: 0 }
+            var rowObjK = keepNotes[k].rowObj || { voice: 0, offset: 0 }
 
             try { curScore.selection.select(kn) } catch (eSel) { continue }
 
             var tbK = __getTieBack(kn);
             if (tbK) {
-              // This note is a continuation of a tie. Its pitch likely already followed the start note.
-              // Skipping avoids double-transpose (+24 bug) and avoids breaking the tie by re-editing it.
-              Log.debug(tag, "tieSkip APPLY chordTick=" + chordTick +
-                             " pitch=" + (kn.pitch !== undefined ? kn.pitch : "?"));
+                // This note is a continuation of a tie. Its pitch likely already followed the start note.
+                // Skipping avoids double-transpose (+24 bug) and avoids breaking the tie by re-editing it.
+                Log.debug(tag, "tieSkip APPLY chordTick=" + chordTick +
+                          " pitch=" + (kn.pitch !== undefined ? kn.pitch : "?"));
 
-              // NEW: consume the tracked tie entry so it can't hijack later chords by matching contPitch again.
-              try {
-                if (tieState) {
-                  var consumed = false;
+                // NEW: consume the tracked tie entry so it can't hijack later chords by matching contPitch again.
+                try {
+                    if (tieState) {
+                        var consumed = false;
 
-                  // Prefer consuming by tie object identity (tieBack is typically the same tie object).
-                  var jC = __findTieRowByTieObject(tieState, tbK);
-                  if (jC >= 0) {
-                    tieState.contPitches[jC] = null;
-                    tieState.ends[jC] = null;
-                    tieState.ties[jC] = null;
-                    consumed = true;
-                    Log.debug(tag, "tieConsume BYOBJ chordTick=" + chordTick +
-                                   " pitch=" + (kn.pitch !== undefined ? kn.pitch : "?") +
-                                   " idx=" + jC);
-                  }
+                        // Prefer consuming by tie object identity (tieBack is typically the same tie object).
+                        var jC = __findTieRowByTieObject(tieState, tbK);
+                        if (jC >= 0) {
+                            tieState.contPitches[jC] = null;
+                            tieState.ends[jC] = null;
+                            tieState.ties[jC] = null;
+                            consumed = true;
+                            Log.debug(tag, "tieConsume BYOBJ chordTick=" + chordTick +
+                                      " pitch=" + (kn.pitch !== undefined ? kn.pitch : "?") +
+                                      " idx=" + jC);
+                        }
 
-                  // Fallback: if identity didn't match, consume by pitch BUT ONLY because tbK confirms it's a real continuation.
-                  if (!consumed && tieState.contPitches && tieState.contPitches.length && kn && kn.pitch !== undefined) {
-                    for (var qC = 0; qC < tieState.contPitches.length; ++qC) {
-                      if (tieState.contPitches[qC] !== null && tieState.contPitches[qC] === kn.pitch) {
-                        tieState.contPitches[qC] = null;
-                        tieState.ends[qC] = null;
-                        tieState.ties[qC] = null;
-                        Log.debug(tag, "tieConsume BYPITCH chordTick=" + chordTick +
-                                       " pitch=" + kn.pitch +
-                                       " idx=" + qC);
-                        break;
-                      }
+                        // Fallback: if identity didn't match, consume by pitch BUT ONLY because tbK confirms it's a real continuation.
+                        if (!consumed && tieState.contPitches && tieState.contPitches.length && kn && kn.pitch !== undefined) {
+                            for (var qC = 0; qC < tieState.contPitches.length; ++qC) {
+                                if (tieState.contPitches[qC] !== null && tieState.contPitches[qC] === kn.pitch) {
+                                    tieState.contPitches[qC] = null;
+                                    tieState.ends[qC] = null;
+                                    tieState.ties[qC] = null;
+                                    Log.debug(tag, "tieConsume BYPITCH chordTick=" + chordTick +
+                                              " pitch=" + kn.pitch +
+                                              " idx=" + qC);
+                                    break;
+                                }
+                            }
+                        }
                     }
-                  }
-                }
-              } catch (eTC) {}
+                } catch (eTC) {}
 
-              continue;
+                continue;
             }
 
             Log.debug(tag, "applyNote chordTick=" + chordTick +
@@ -1434,25 +1437,25 @@ MuseScore {
             // If this note starts a tie forward, remember it (so we can keep its continuation later)
             var tfK = __getTieForward(kn);
             if (tfK && tieState) {
-              tieState.ties.push(tfK);
-              tieState.rows.push(rowObjK);
-              tieState.rowIdx.push(keepNotes[k].rowIndex);
+                tieState.ties.push(tfK);
+                tieState.rows.push(rowObjK);
+                tieState.rowIdx.push(keepNotes[k].rowIndex);
 
-              // store end note identity too, if we can get it
-              var endN = __getTieEndNoteFromTieForward(tfK);
-              tieState.ends.push(endN);
+                // store end note identity too, if we can get it
+                var endN = __getTieEndNoteFromTieForward(tfK);
+                tieState.ends.push(endN);
 
-              // NEW: store expected continuation pitch (use endN.pitch if available, else the start pitch)
-              var contPitch = (endN && endN.pitch !== undefined) ? endN.pitch
-                             : (kn && kn.pitch !== undefined) ? kn.pitch
-                             : null;
-              tieState.contPitches.push(contPitch);
+                // NEW: store expected continuation pitch (use endN.pitch if available, else the start pitch)
+                var contPitch = (endN && endN.pitch !== undefined) ? endN.pitch
+                                                                   : (kn && kn.pitch !== undefined) ? kn.pitch
+                                                                                                    : null;
+                tieState.contPitches.push(contPitch);
 
-              Log.debug(tag, "tieTrack START chordTick=" + chordTick +
-                             " pitch=" + (kn.pitch !== undefined ? kn.pitch : "?") +
-                             " rowIdx=" + keepNotes[k].rowIndex +
-                             " endNote=" + (endN ? (endN.pitch !== undefined ? endN.pitch : "?") : "null") +
-                             " contPitch=" + (contPitch !== null ? contPitch : "null"));
+                Log.debug(tag, "tieTrack START chordTick=" + chordTick +
+                          " pitch=" + (kn.pitch !== undefined ? kn.pitch : "?") +
+                          " rowIdx=" + keepNotes[k].rowIndex +
+                          " endNote=" + (endN ? (endN.pitch !== undefined ? endN.pitch : "?") : "null") +
+                          " contPitch=" + (contPitch !== null ? contPitch : "null"));
             }
             try { if (curScore.selection && curScore.selection.clear) curScore.selection.clear() } catch (eClr) {}
         }
@@ -3253,8 +3256,7 @@ MuseScore {
 
                         function setVoiceForRow(rowIndex, v) {
                             // Disallow "no voice": clicking the same voice keeps it selected.
-                            // Coerce v to 1..4; default to 1 if anything unexpected comes in.
-                            var vv = (v === 1 || v === 2 || v === 3 || v === 4) ? v : 1
+                            var vv = (v === 0 || v === 1 || v === 2 || v === 3) ? v : 0
                             var m = Object.assign({}, voiceByRow)
                             m[rowIndex] = vv
                             voiceByRow = m
@@ -3324,11 +3326,11 @@ MuseScore {
                             ListElement { name: qsTr("Second note")}
                             ListElement { name: qsTr("Bottom note")}
 
-                            // If rows are ever added later, default them to Voice 1
+                            // If rows are ever added later, default them to voice 0 (UI voice 1)
                             onCountChanged: {
                                 var m = Object.assign({}, noteButtonsPane.voiceByRow)
                                 for (var i = 0; i < noteButtonsModel.count; ++i) {
-                                    if (m[i] === undefined) m[i] = 1
+                                    if (m[i] === undefined) m[i] = 0
                                 }
                                 noteButtonsPane.voiceByRow = m
                             }
@@ -3505,34 +3507,34 @@ MuseScore {
                                             FlatButton {
                                                 id: voice1Btn
                                                 icon: IconCode.VOICE_1
+                                                property bool selected: (noteButtonsPane.voiceByRow[index] === 0)
+                                                accentButton: selected
+                                                transparent: !selected
+                                                onClicked: noteButtonsPane.setVoiceForRow(index, 0)
+                                            }
+                                            FlatButton {
+                                                id: voice2Btn
+                                                icon: IconCode.VOICE_2
                                                 property bool selected: (noteButtonsPane.voiceByRow[index] === 1)
                                                 accentButton: selected
                                                 transparent: !selected
                                                 onClicked: noteButtonsPane.setVoiceForRow(index, 1)
                                             }
                                             FlatButton {
-                                                id: voice2Btn
-                                                icon: IconCode.VOICE_2
+                                                id: voice3Btn
+                                                icon: IconCode.VOICE_3
                                                 property bool selected: (noteButtonsPane.voiceByRow[index] === 2)
                                                 accentButton: selected
                                                 transparent: !selected
                                                 onClicked: noteButtonsPane.setVoiceForRow(index, 2)
                                             }
                                             FlatButton {
-                                                id: voice3Btn
-                                                icon: IconCode.VOICE_3
+                                                id: voice4Btn
+                                                icon: IconCode.VOICE_4
                                                 property bool selected: (noteButtonsPane.voiceByRow[index] === 3)
                                                 accentButton: selected
                                                 transparent: !selected
                                                 onClicked: noteButtonsPane.setVoiceForRow(index, 3)
-                                            }
-                                            FlatButton {
-                                                id: voice4Btn
-                                                icon: IconCode.VOICE_4
-                                                property bool selected: (noteButtonsPane.voiceByRow[index] === 4)
-                                                accentButton: selected
-                                                transparent: !selected
-                                                onClicked: noteButtonsPane.setVoiceForRow(index, 4)
                                             }
                                         }
                                     }
