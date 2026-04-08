@@ -27,7 +27,7 @@ MuseScore {
     title: qsTr("Orchestrator")
     description: qsTr("Quickly orchestrate sketches")
     thumbnailName: "orchestrator.png"
-    version: "0.2.2"
+    version: "0.2.3"
 
     categoryCode: qsTr("Composing/arranging tools")
 
@@ -783,10 +783,30 @@ MuseScore {
 
     // cmd() strings must match MuseScore command names
     // see src/notationscene/internal/notationuiactions.cpp
-    function __doCopy()   { cmd("action://copy") }
-    function __doPaste()  { cmd("action://paste") }
+    function __doCopy() { cmd("action://copy") }
+    function __doPaste() { cmd("action://paste") }
     function __doDelete() { cmd("action://delete") }
     function __escape()   { cmd("escape") } //action://notation/cancel
+
+    // Best-effort tie command (different builds name it differently)
+    function __doAddTieBestEffort() {
+        // Try a small set of likely command names
+        var candidates = [
+                    "tie",
+                    "add-tie",
+                    "action://notation/tie",
+                    "action://tie"
+                ];
+
+        for (var i = 0; i < candidates.length; ++i) {
+            try {
+                cmd(candidates[i]);
+                // We can't reliably detect success, but the dispatcher log will show attempts.
+                return;
+            } catch (e) {}
+        }
+    }
+
     function __clearScoreSelection() {
         try {
             if (curScore && curScore.selection && typeof curScore.selection.clear === "function")
@@ -806,6 +826,102 @@ MuseScore {
         if (vv > 3) vv = 3
         // command names are voice-1..voice-4, so convert 0..3 -> 1..4
         cmd("voice-" + (vv + 1))
+    }
+
+    function __noteVoiceIndex(note) {
+        if (!note) return -1
+        // Prefer track%4 because that’s the real routing; voice may be absent or stale.
+        try {
+            if (note.track !== undefined && note.track !== null)
+                return Number(note.track) % 4
+        } catch (e0) {}
+        try {
+            if (note.voice !== undefined && note.voice !== null)
+                return Number(note.voice)
+        } catch (e1) {}
+        return -1
+    }
+
+    function __addNoteAtTickInVoice(staffIdx, tick, voiceIdx, pitch, durationFrac) {
+        if (!curScore) return false
+
+        var v = Number(voiceIdx ?? 0)
+        if (v < 0) v = 0
+        if (v > 3) v = 3
+
+        var t = Number(tick ?? 0)
+        if (isNaN(t) || t < 0) t = 0
+
+        var c = curScore.newCursor()
+        if (!c) return false
+
+        // IMPORTANT: Seek on voice 0 first so the cursor can always land on a real segment.
+        // Many scores have no elements in voice 1 yet, so seeking on that track can fail.
+        c.track = staffBaseTrack(staffIdx) // voice 0 anchor track
+
+        if (!__seekCursorToTick(c, t)) {
+            Log.warn(tag, "__addNoteAtTickInVoice: seek failed staffIdx=" + staffIdx + " voice=" + v + " tick=" + t)
+            return false
+        }
+
+        // Now switch voice WITHOUT moving the segment.
+        // Cursor.setVoice() changes track but keeps location.
+        try { c.voice = v } catch (eV) {
+            try { c.track = staffBaseTrack(staffIdx) + v } catch (eT) {}
+        }
+
+        // Ensure duration is set
+        try {
+            if (durationFrac && durationFrac.numerator !== undefined && durationFrac.denominator !== undefined) {
+                c.setDuration(durationFrac.numerator, durationFrac.denominator)
+            } else {
+                c.setDuration(1, 4)
+            }
+        } catch (eDur) {
+            c.setDuration(1, 4)
+        }
+
+        // Add the note
+        // Prefer direct note entry at the current segment.
+        // If there's no chord yet in this voice at this tick, addToChord MUST be false.
+        try {
+            var addToChord = true
+            try {
+                if (!c.element)
+                    addToChord = false
+                else if (c.element.type === Element.REST)
+                    addToChord = false
+            } catch (eType) {}
+
+            c.addNote(Number(pitch), addToChord)
+
+            Log.debug(tag, "__addNoteAtTickInVoice: after addNote tick=" + String(c.tick) + " elementType=" + String(c.element ? c.element.type : "null"))
+
+            return true
+
+        } catch (eAdd0) {
+            // Fallback: some builds may require a CR anchor. If we add a rest, it might advance,
+            // so immediately return to the target tick before adding the note.
+            try {
+                if (!c.element) {
+                    c.addRest()
+                    // Restore cursor to the intended tick (avoid beat-2 shift)
+                    c.track = staffBaseTrack(staffIdx) // voice 0 anchor
+                    __seekCursorToTick(c, t)
+                    try { c.voice = v } catch (eV2) { c.track = staffBaseTrack(staffIdx) + v }
+
+                    // Now replace the rest with the note
+                    c.addNote(Number(pitch), false)
+                    return true
+                }
+            } catch (eAdd1) {}
+
+            Log.warn(tag,
+                     "__addNoteAtTickInVoice: addNote failed pitch=" + pitch +
+                     " tick=" + t + " voice=" + v +
+                     " err=" + String(eAdd0))
+            return false
+        }
     }
 
     function __dbgElement(el) {
@@ -863,17 +979,73 @@ MuseScore {
 
     function __seekCursorToTick(c, targetTick) {
         if (!c) return false
-        var t = Number(targetTick || 0)
 
+        var t = Number(targetTick ?? 0)
+
+        // Establish a defined cursor location on a known-good track (0),
+        // then restore the desired track. Some builds can fail rewind() on voice>0 tracks.
+        var desiredTrack = 0
+        try { desiredTrack = Number(c.track ?? 0) } catch (e0) { desiredTrack = 0 }
+
+        try { c.track = 0 } catch (e1) {}
         try { c.rewind(Cursor.SCORE_START) } catch (e) { try { c.rewind(0) } catch (e2) {} }
+
+        try { c.track = desiredTrack } catch (e3) {}
+
+        // If switching back invalidated the segment, rewind again now that track is set.
+        if (!c.segment) {
+            try { c.rewind(Cursor.SCORE_START) } catch (e4) { try { c.rewind(0) } catch (e5) {} }
+        }
 
         var guard = 0
         while (c.segment && c.segment.tick !== undefined && c.segment.tick < t && guard < 200000) {
             c.next()
             guard++
         }
+
         return !!c.segment
     }
+
+    function __findNoteAtTickInVoice(staffIdx, tick, voiceIdx, pitch) {
+        if (!curScore) return null;
+
+        var v = Number(voiceIdx ?? 0);
+        if (v < 0) v = 0;
+        if (v > 3) v = 3;
+
+        var t = Number(tick ?? 0);
+        if (isNaN(t) || t < 0) t = 0;
+
+        var p = Number(pitch);
+        if (isNaN(p)) return null;
+
+        var c = curScore.newCursor();
+        if (!c) return null;
+
+        // Seek on voice 0 track first (reliable segment)
+        c.track = staffBaseTrack(staffIdx);
+        if (!__seekCursorToTick(c, t)) return null;
+
+        // Switch to requested voice without moving the segment
+        try { c.voice = v } catch (eV) {
+            try { c.track = staffBaseTrack(staffIdx) + v } catch (eT) {}
+        }
+
+        var el = c.element;
+        if (!el || !el.notes || !el.notes.length) return null;
+
+        // Find exact pitch match in that chord
+        for (var i = 0; i < el.notes.length; ++i) {
+            var n = el.notes[i];
+            try {
+                if (n && n.pitch !== undefined && Number(n.pitch) === p) return n;
+            } catch (eP) {}
+        }
+
+        return null;
+    }
+
+
 
     function __selectPasteAnchorForStaff(staffIdx, startTick, endTick) {
         if (!curScore) return false
@@ -960,6 +1132,36 @@ MuseScore {
         return out
     }
 
+    function __collectChordsInTickRangeForTrack(track, startTick, endTick) {
+        var out = [];
+        if (!curScore) return out;
+
+        var st = Number(startTick ?? 0);
+        var et = Number(endTick ?? st);
+        if (et < st) { var tmp = st; st = et; et = tmp; }
+
+        var c = curScore.newCursor();
+        if (!c) return out;
+
+        c.track = Number(track ?? 0);
+
+        if (!__seekCursorToTick(c, st)) return out;
+
+        var guard = 0;
+        while (c.segment && c.segment.tick !== undefined && c.segment.tick < et && guard < 200000) {
+            var el = c.element;
+            if (el && el.notes && el.notes.length) {
+                // IMPORTANT: capture the tick from the cursor (reliable),
+                // because chord.segment.tick is logging as "?" in runtime.
+                out.push({ chord: el, tick: c.tick });
+            }
+            c.next();
+            guard++;
+        }
+
+        return out;
+    }
+
     function __getTieBack(note) {
         try { if (note && note.tieBack) return note.tieBack; } catch (e) {}
         try { if (note && note.tieBackward) return note.tieBackward; } catch (e2) {}
@@ -1004,33 +1206,55 @@ MuseScore {
         return -1;
     }
 
-
-    function __preparePasteCursorAtTick(staffIdx, startSegTick) {
+    function __preparePasteCursorAtTick(track, startSegTick) {
         if (!curScore) return null
-
         var cursor = curScore.newCursor()
         if (!cursor) return null
 
-        cursor.track = staffBaseTrack(staffIdx)
-        cursor.rewindToTick(startSegTick)
+        cursor.track = Number(track ?? 0)
 
+        // Use seek (rewind + walk segments) so the cursor location is defined.
+        if (!__seekCursorToTick(cursor, startSegTick)) {
+            try {
+                Log.error(tag, "seekCursorToTick failed track=" + String(cursor.track) +
+                          " targetTick=" + String(startSegTick) +
+                          " segment=" + String(!!cursor.segment))
+            } catch (eLog) {}
+            return null
+        }
+
+        // If we're at the target tick but there's no element in this voice track,
+        // create a rest so there's something selectable to paste onto.
+        if (cursor.tick === startSegTick && !cursor.element) {
+            cursor.setDuration(1, 4)
+            cursor.addRest()
+            if (!cursor.element) {
+                // Best-effort: some builds only expose element after moving
+                try { cursor.prev() } catch (e0) {}
+            }
+            return cursor
+        }
+
+        // If we overshot the tick, step back and insert a rest anchor.
         if (cursor.tick > startSegTick) {
             cursor.prev()
             cursor.setDuration(1, 4)
             cursor.addRest()
-            cursor.rewindToTick(startSegTick)
+            if (!cursor.element) {
+                try { cursor.prev() } catch (e1) {}
+            }
+            return cursor
         }
 
-        while (cursor.tick > startSegTick) {
-            cursor.prev()
-            if (!cursor.element || !cursor.element.duration) break
-            var n = cursor.element.duration.numerator
-            var d = cursor.element.duration.denominator
-            cursor.setDuration(n, d * 2)
-            cursor.addRest()
-            cursor.rewindToTick(startSegTick)
-        }
+        // Already have something at this tick
+        if (cursor.element) return cursor
 
+        // Safety fallback
+        cursor.setDuration(1, 4)
+        cursor.addRest()
+        if (!cursor.element) {
+            try { cursor.prev() } catch (e2) {}
+        }
         return cursor
     }
 
@@ -1065,60 +1289,120 @@ MuseScore {
         return ix
     }
 
+    function __voicesUsedByRows(rows) {
+        var seen = {};
+        var out = [];
+        if (!rows || !rows.length) return out;
 
-    function __applyRowsToChord(chord, rows, tieState) {
+        for (var i = 0; i < 8; ++i) {
+            var r = rows[i];
+            if (!r || !r.active) continue;
+            var v = Number(r.voice ?? 0);
+            if (v < 0) v = 0;
+            if (v > 3) v = 3;
+            if (!seen[v]) {
+                seen[v] = true;
+                out.push(v);
+            }
+        }
+        out.sort(function(a,b){ return a-b; });
+        return out;
+    }
+
+    // Returns a deep-cloned 8-row array where only rows assigned to `voice` remain active
+    function __rowsForSingleVoice(rows, voice) {
+        var v = Number(voice ?? 0);
+        if (v < 0) v = 0;
+        if (v > 3) v = 3;
+
+        var out = [];
+        for (var i = 0; i < 8; ++i) {
+            var r = (rows && rows[i]) ? rows[i] : { active:false, offset:0, voice:0 };
+            var rv = Number(r.voice ?? 0);
+            if (rv < 0) rv = 0;
+            if (rv > 3) rv = 3;
+
+            out.push({
+                         active: !!r.active && (rv === v),
+                         offset: Number(r.offset ?? 0),
+                         voice: rv
+                     });
+        }
+        return out;
+    }
+
+    function __applyRowsToChord(chordObj, rows, tieState, opts) {
+        // Accept either a raw chord OR { chord, tick }
+        var chord = (chordObj && chordObj.chord) ? chordObj.chord : chordObj;
+        var chordTickNum = (chordObj && chordObj.tick !== undefined) ? Number(chordObj.tick) : null;
+
         if (!chord || !chord.notes || !chord.notes.length || !rows || !rows.length)
-            return
+            return;
 
-        var chordTick = "?"
-        try {
-            chordTick = (chord.segment && chord.segment.tick !== undefined)
-                    ? String(chord.segment.tick)
-                    : (chord.tick !== undefined ? String(chord.tick) : "?")
-        } catch (e0) {}
+        // Debug string: if we have a numeric tick, show it.
+        var chordTick = (chordTickNum !== null && !isNaN(chordTickNum)) ? String(chordTickNum) : "?";
+
+        // NEW: optionally restrict to a single voice before mapping/pruning
+        var filterVoice = (opts && opts.filterVoice !== undefined && opts.filterVoice !== null)
+                ? Number(opts.filterVoice)
+                : null
+
+        var notes0 = chord.notes ? chord.notes.slice(0) : []
+        if (filterVoice !== null) {
+            var filtered = []
+            for (var ii = 0; ii < notes0.length; ++ii) {
+                var nv = __noteVoiceIndex(notes0[ii])
+                if (nv === filterVoice) filtered.push(notes0[ii])
+            }
+            notes0 = filtered
+        }
+
+        // Nothing to do if this chord has no notes in the requested voice
+        if (!notes0.length) return
 
         // Sort notes high→low (row 0 conceptually maps to "top" before mapping)
-        var notes = chord.notes.slice(0).sort(function(a, b) {
-            var pa = (a && a.pitch !== undefined) ? a.pitch : 0;
-            var pb = (b && b.pitch !== undefined) ? b.pitch : 0;
-            if (pb !== pa) return pb - pa;
-
-            // Same pitch: prefer NON-tie continuations first
-            // so Top note picks the musical note, not the tie-back continuation
-            var aTie = !!__getTieBack(a);
-            var bTie = !!__getTieBack(b);
-            if (aTie !== bTie) return (aTie ? 1 : -1);
-
-            return 0;
+        var notes = notes0.sort(function(a, b) {
+            var pa = (a && a.pitch !== undefined) ? a.pitch : 0
+            var pb = (b && b.pitch !== undefined) ? b.pitch : 0
+            if (pb !== pa) return pb - pa
+            var aTie = !!__getTieBack(a)
+            var bTie = !!__getTieBack(b)
+            if (aTie !== bTie) return (aTie ? 1 : -1)
+            return 0
         })
 
-        // Decide which notes to keep using mapping (rows 0..7 -> chord note indices 0..noteCount-1)
         var noteCount = notes.length
 
-        // --- Single-note semantic: treat single notes as TOP notes ---
-        // If the staff/preset does NOT include Top note (row 0), then a single-note chord
-        // should become a rest (i.e., delete the note).
+        // --- Single-note semantic ---
+        // Default behavior: treat single notes as TOP notes.
+        // Per-voice behavior: allow single notes if ANY active row exists for that voice pass.
         if (noteCount === 1) {
-            var topActive = !!(rows && rows[0] && rows[0].active);
+            var allowAny = !!(opts && opts.singleNoteAllowAnyActive);
 
-            if (!topActive) {
-                // No Top row configured -> delete the single note so a rest remains
-                Log.debug(tag, "singleNoteAsTop -> REST chordTick=" + chordTick +
-                          " pitch=" + (notes[0] && notes[0].pitch !== undefined ? notes[0].pitch : "?"));
-
-                try {
-                    curScore.selection.select(notes[0]);
-                    __doDelete();
-                } catch (eSN) {
-                    Log.error(tag, "singleNoteAsTop delete failed: " + String(eSN));
-                }
-
-                // Nothing else to do on this chord
-                return;
+            var anyActive = false;
+            for (var rA = 0; rA < 8; ++rA) {
+                if (rows && rows[rA] && rows[rA].active) { anyActive = true; break; }
             }
 
-            // Top row IS active -> force mapping to the only note as Top row
-            // (continue with the normal pipeline, but ensure only Top is considered active here)
+            if (allowAny) {
+                // In per-voice mode, a single-note chord is valid if this voice pass has any active row.
+                if (!anyActive) return;
+                // Continue with normal pipeline (it will keep the single note via mapping).
+            } else {
+                // Original behavior: only keep if Top row is active
+                var topActive = !!(rows && rows[0] && rows[0].active);
+                if (!topActive) {
+                    Log.debug(tag, "singleNoteAsTop -> REST chordTick=" + chordTick +
+                              " pitch=" + (notes[0] && notes[0].pitch !== undefined ? notes[0].pitch : "?"));
+                    try {
+                        curScore.selection.select(notes[0]);
+                        __doDelete();
+                    } catch (eSN) {
+                        Log.error(tag, "singleNoteAsTop delete failed: " + String(eSN));
+                    }
+                    return;
+                }
+            }
         }
 
         // Map: noteIndex -> rowObj (settings) for notes we keep
@@ -1380,19 +1664,23 @@ MuseScore {
 
             try { curScore.selection.select(kn) } catch (eSel) { continue }
 
+            // Determine targetVoice early so tie-continuation skips only apply to voice 0 processing
+            var targetVoiceEarly = (rowObjK && rowObjK.voice !== undefined) ? Number(rowObjK.voice) : 0;
+            if (targetVoiceEarly < 0) targetVoiceEarly = 0;
+            if (targetVoiceEarly > 3) targetVoiceEarly = 3;
+
             var tbK = __getTieBack(kn);
-            if (tbK) {
-                // This note is a continuation of a tie. Its pitch likely already followed the start note.
-                // Skipping avoids double-transpose (+24 bug) and avoids breaking the tie by re-editing it.
+
+            // Only skip tie continuations when we are actually editing voice 0 notes.
+            // For non-zero voices we are INSERTING new notes, so we must not skip.
+            if (tbK && targetVoiceEarly === 0) {
                 Log.debug(tag, "tieSkip APPLY chordTick=" + chordTick +
                           " pitch=" + (kn.pitch !== undefined ? kn.pitch : "?"));
 
-                // NEW: consume the tracked tie entry so it can't hijack later chords by matching contPitch again.
+                // Keep your existing consumption behavior for voice 0
                 try {
                     if (tieState) {
                         var consumed = false;
-
-                        // Prefer consuming by tie object identity (tieBack is typically the same tie object).
                         var jC = __findTieRowByTieObject(tieState, tbK);
                         if (jC >= 0) {
                             tieState.contPitches[jC] = null;
@@ -1403,8 +1691,6 @@ MuseScore {
                                       " pitch=" + (kn.pitch !== undefined ? kn.pitch : "?") +
                                       " idx=" + jC);
                         }
-
-                        // Fallback: if identity didn't match, consume by pitch BUT ONLY because tbK confirms it's a real continuation.
                         if (!consumed && tieState.contPitches && tieState.contPitches.length && kn && kn.pitch !== undefined) {
                             for (var qC = 0; qC < tieState.contPitches.length; ++qC) {
                                 if (tieState.contPitches[qC] !== null && tieState.contPitches[qC] === kn.pitch) {
@@ -1424,14 +1710,74 @@ MuseScore {
                 continue;
             }
 
+            // For non-zero voices, do NOT continue here; allow the insert path to run.
+
             Log.debug(tag, "applyNote chordTick=" + chordTick +
                       " pitch=" + (kn.pitch !== undefined ? kn.pitch : "?") +
                       " voice=" + (rowObjK.voice !== undefined ? rowObjK.voice : "?") +
                       " offset=" + (rowObjK.offset !== undefined ? rowObjK.offset : "?"))
 
-            if (rowObjK.voice !== undefined) __setVoice(rowObjK.voice)
+            var skipVoiceCmd = !!(opts && opts.skipVoiceCmd)
 
+            var targetVoice = (rowObjK.voice !== undefined) ? Number(rowObjK.voice) : 0
             var deltaK = Number(rowObjK.offset ?? 0)
+
+            if (targetVoice !== 0) {
+                var staffIdx2 = (opts && typeof opts.staffIdx === "number") ? opts.staffIdx : -1;
+                var tick2 = (chordTickNum !== null && !isNaN(chordTickNum)) ? chordTickNum : 0;
+
+                if (staffIdx2 < 0) {
+                    Log.warn(tag, "voice>0 insert: missing staffIdx; skipping");
+                    continue;
+                }
+
+                var dur = null;
+                try { dur = chord.duration } catch (eD) { dur = null }
+
+                var newPitch = (kn && kn.pitch !== undefined) ? (Number(kn.pitch) + deltaK) : null;
+                if (newPitch === null || isNaN(newPitch)) {
+                    continue;
+                }
+
+                // 1) Insert the destination note
+                __addNoteAtTickInVoice(staffIdx2, tick2, targetVoice, newPitch, dur);
+
+                // 2) Resolve the inserted Note object (needed to attach a tie)
+                var destNote = __findNoteAtTickInVoice(staffIdx2, tick2, targetVoice, newPitch);
+
+                // 3) Tie replication (best effort)
+                // If the SOURCE note has tieBack, we should tie from the previously inserted start note.
+                var hasTieBack = !!__getTieBack(kn);
+                var hasTieForward = !!__getTieForward(kn);
+
+                if (tieState && tieState.pendingTieByPitch) {
+                    var key = String(newPitch);
+
+                    // Finalize pending tie if this is a continuation
+                    if (hasTieBack && tieState.pendingTieByPitch[key]) {
+                        try {
+                            var startDest = tieState.pendingTieByPitch[key];
+                            // Create tie by selecting the start note and invoking tie command
+                            curScore.selection.select(startDest);
+                            __doAddTieBestEffort();
+                        } catch (eTie) {}
+
+                        // Consume the pending tie start
+                        try { delete tieState.pendingTieByPitch[key]; } catch (eDel) {}
+                    }
+
+                    // Start a new pending tie if this note begins a tie forward
+                    // (works for both initial tie starts and mid-chain tie forward notes)
+                    if (hasTieForward && destNote) {
+                        tieState.pendingTieByPitch[key] = destNote;
+                    }
+                }
+
+                // Do not transpose existing source note; voice 0 pass will prune it.
+                continue;
+            }
+
+            // Otherwise (voice 0), keep your existing transpose-by-actions behavior:
             if (deltaK !== 0) {
                 var stepsK = deltaK
                 while (stepsK >= 12) { __pitchUpOctave(); stepsK -= 12 }
@@ -1466,19 +1812,26 @@ MuseScore {
             try { if (curScore.selection && curScore.selection.clear) curScore.selection.clear() } catch (eClr) {}
         }
 
-        // 2) Now delete unwanted notes (safe one-by-one)
-        for (var d = 0; d < deleteNotes.length; ++d) {
-            var dn = deleteNotes[d]
-            try {
-                curScore.selection.select(dn)
-                __doDelete()
-            } catch (eDel) {
-                Log.error(tag, "__applyRowsToChord delete failed: " + String(eDel))
-            }
-        }
+        var skipDelete = !!(opts && opts.skipDelete)
 
-        // Ensure we don't leave the last deleted/selected note highlighted
-        __clearScoreSelection();
+        // 2) Now delete unwanted notes (safe one-by-one)
+        if (!skipDelete) {
+            for (var d = 0; d < deleteNotes.length; ++d) {
+                var dn = deleteNotes[d]
+                try {
+                    curScore.selection.select(dn)
+                    __doDelete()
+                } catch (eDel) {
+                    Log.error(tag, "__applyRowsToChord delete failed: " + String(eDel))
+                }
+            }
+
+            // Ensure we don't leave the last deleted/selected note highlighted
+            __clearScoreSelection();
+        } else {
+            // Still clear selection so we don't leak UI selection state
+            __clearScoreSelection();
+        }
     }
 
     // Public entry point: fire preset by index (normal-mode card click)
@@ -1539,60 +1892,76 @@ MuseScore {
                          " startTick=" + startTick + " endTick=" + endTick)
 
                 var rows = p.noteRowsByStaff[staffIdx]
-
-                // Tie tracking: tie object identity is stable across segments
-                var tieState = { ties: [], rows: [], rowIdx: [], ends: [], contPitches: [] };
-
                 if (!rows || !hasAnyActiveRows(rows))
                     continue
 
-                var dc = __preparePasteCursorAtTick(staffIdx, startSegTick)
+                var voices = __voicesUsedByRows(rows)
+                if (!voices.length)
+                    continue
 
-                try {
-                    Log.debug(tag, "destination cursor (dc) after prepare tick=" + dc.tick +
-                              " track=" + dc.track +
-                              " element=" + __dbgElement(dc.element) +
-                              " sel=" + __dbgSelection())
-                } catch (eDc) {
-                    Log.error(tag, "dc debug failed: " + String(eDc))
+                // NEW: run non-zero voices first, then voice 0 last
+                var orderedVoices = []
+                for (var iV = 0; iV < voices.length; ++iV) {
+                    if (voices[iV] !== 0) orderedVoices.push(voices[iV])
                 }
+                if (voices.indexOf(0) >= 0) orderedVoices.push(0)
 
-                if (!dc) {
-                    Log.error(tag, "firePreset: could not prepare destination cursor for staff " + staffIdx)
+                var anchorTrack = staffBaseTrack(staffIdx)
+
+                // NEW: Paste ONCE per staff, on base track
+                var dc0 = __preparePasteCursorAtTick(anchorTrack, startSegTick)
+                if (!dc0) {
+                    Log.error(tag, "firePreset: could not prepare destination cursor for staff " + staffIdx + " anchorTrack " + anchorTrack)
                     continue
                 }
-
-                if (!__selectCursorElementForPaste(dc)) {
-                    Log.error(tag, "firePreset: could not select destination element for staff " + staffIdx)
+                if (!__selectCursorElementForPaste(dc0)) {
+                    Log.error(tag, "firePreset: could not select destination element for staff " + staffIdx + " anchorTrack " + anchorTrack)
                     continue
                 }
-
-                Log.debug(tag, "aboutToPaste staffIdx=" + staffIdx + " sel=" + __dbgSelection())
-
+                __setVoice(0)
                 __doPaste()
+                __escape()
+                __setVoice(0)
 
-                Log.debug(tag, "afterPaste staffIdx=" + staffIdx + " sel=" + __dbgSelection())
+                // NEW: Collect chords ONCE after the paste
+                var chords = __collectChordsInTickRangeForTrack(anchorTrack, startTick, endTick)
+                Log.info(tag, "collectedChords staffIdx=" + staffIdx + " voice=ALL count=" + chords.length)
 
-                __escape()        // collapse any range selection / exit write mode
-                // __escape()        // (optional) some builds need 2 to fully exit note entry
+                // Now run the voice passes without re-pasting
+                for (var vI = 0; vI < orderedVoices.length; ++vI) {
+                    var voiceIdx = orderedVoices[vI]
+                    var rowsForVoice = __rowsForSingleVoice(rows, voiceIdx)
 
+                    Log.debug(tag, "rowsForVoice staffIdx=" + staffIdx + " voice=" + voiceIdx +
+                              " anyActive=" + String(hasAnyActiveRows(rowsForVoice)))
 
-                var chords = __collectChordsInTickRangeForStaff(staffIdx, startTick, endTick)
+                    var tieState = {
+                        ties: [],
+                        rows: [],
+                        rowIdx: [],
+                        ends: [],
+                        contPitches: [],
+                        pendingTieByPitch: ({}) // for destination-voice inserts (voice>0)
+                    }
 
-                Log.info(tag, "collectedChords staffIdx=" + staffIdx + " count=" + chords.length)
-                for (var i = 0; i < Math.min(chords.length, 12); ++i) {
-                    var ch = chords[i]
-                    var ct = "?"
-                    try { ct = (ch.segment && ch.segment.tick !== undefined) ? ch.segment.tick : (ch.tick !== undefined ? ch.tick : "?") } catch(eT) {}
-                    var pitches = []
-                    try {
-                        for (var n = 0; n < (ch.notes ? ch.notes.length : 0); ++n) pitches.push(ch.notes[n].pitch)
-                    } catch(eP) {}
-                    Log.debug(tag, "chord[" + i + "] tick=" + ct + " pitches=" + JSON.stringify(pitches))
-                }
+                    for (var c = 0; c < chords.length; ++c) {
+                        __applyRowsToChord(
+                                    chords[c],
+                                    rowsForVoice,
+                                    tieState,
+                                    {
+                                        staffIdx: staffIdx,
+                                        skipVoiceCmd: false,
+                                        singleNoteAllowAnyActive: (voiceIdx !== 0),
+                                        skipDelete: (voiceIdx !== 0),
+                                        filterVoice: 0
+                                    }
+                                    )
 
-                for (var c = 0; c < chords.length; ++c) {
-                    __applyRowsToChord(chords[c], rows, tieState)
+                    }
+
+                    try { if (curScore.selection && curScore.selection.clear) curScore.selection.clear() } catch (eClr2) {}
+                    __escape()
                 }
 
                 __clearScoreSelection()
