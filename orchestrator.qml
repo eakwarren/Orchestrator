@@ -2422,7 +2422,7 @@ MuseScore {
                             }
 
                             const startW  = orchestratorWin.width
-                            const targetW = root.settingsOpen ? (root.baseWidth + 607) : root.baseWidth
+                            const targetW = root.settingsOpen ? (root.baseWidth + 592) : root.baseWidth
 
                             // Temporarily allow animation range, then re-lock to targetW
                             orchestratorWin.minimumWidth = Math.min(startW, targetW)
@@ -4076,13 +4076,13 @@ MuseScore {
                                 anchors.top: notationElementsWrapper.top
                                 spacing: 6
 
-                                Label {
-                                    text: qsTr("Notation Elements")
-                                    font.bold: true
-                                    color: ui.theme.fontPrimaryColor
-                                    // Layout.topMargin: 10
-                                    Layout.leftMargin: 5
-                                }
+                                // Label {
+                                //     text: qsTr("Notation Elements")
+                                //     font.bold: true
+                                //     color: ui.theme.fontPrimaryColor
+                                //     // Layout.topMargin: 10
+                                //     Layout.leftMargin: 5
+                                // }
 
                                 ColumnLayout {
                                     // Fill the wrapper Item and leave a 10px faux margin at the bottom,
@@ -4091,175 +4091,6 @@ MuseScore {
                                     Layout.leftMargin: 5
                                     spacing: 6
 
-                                    // Master 'All' checkbox (Muse.UiComponents)
-                                    // Visual tri-state via isIndeterminate; click cycles Checked<->Unchecked
-                                    CheckBox {
-                                        id: allBox
-                                        text: qsTr("All")
-
-                                        // All is 'checked' only when every child is on
-                                        checked: {
-                                            var p = notationElementsWrapper.currentPreset()
-                                            return p && p.notationFilter ? (notationAllState(p.notationFilter) === Qt.Checked) : true
-                                        }
-
-                                        // Show the dash when some but not all items are selected
-                                        isIndeterminate: {
-                                            var p = notationElementsWrapper.currentPreset()
-                                            return p && p.notationFilter ? (notationAllState(p.notationFilter) === Qt.PartiallyChecked) : false
-                                        }
-
-                                        // Clicking the parent toggles "all on" when indeterminate/unchecked, or "all off" when checked
-                                        onClicked: {
-                                            var p = notationElementsWrapper.currentPreset()
-                                            if (!p || !p.notationFilter) return
-                                            var st = notationAllState(p.notationFilter)  // Qt.Unchecked / Qt.PartiallyChecked / Qt.Checked
-                                            var wantOn = (st !== Qt.Checked)             // partial/unchecked -> turn everything ON; checked -> OFF
-                                            notationElementsWrapper.setAllChecked(wantOn)
-                                        }
-                                    }
-
-                                    // Child rows (bind directly to the selected preset's notationFilter keys)
-                                    CheckBox {
-                                        text: qsTr("Dynamics")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.dynamics)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("dynamics")
-                                    }
-                                    CheckBox {
-                                        text: qsTr("Hairpins")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.hairpins)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("hairpins")
-                                    }
-                                    // CheckBox {
-                                    //     text: qsTr("Fingerings")
-                                    //     checked: !!(notationElementsWrapper.currentPreset()
-                                    //                 && notationElementsWrapper.currentPreset().notationFilter
-                                    //                 && notationElementsWrapper.currentPreset().notationFilter.fingerings)
-                                    //     onClicked: notationElementsWrapper.toggleKeyInverse("fingerings")
-                                    // }
-                                    // CheckBox {
-                                    //     text: qsTr("Lyrics")
-                                    //     checked: !!(notationElementsWrapper.currentPreset()
-                                    //                 && notationElementsWrapper.currentPreset().notationFilter
-                                    //                 && notationElementsWrapper.currentPreset().notationFilter.lyrics)
-                                    //     onClicked: notationElementsWrapper.toggleKeyInverse("lyrics")
-                                    // }
-                                    // CheckBox {
-                                    //     text: qsTr("Chord symbols")
-                                    //     checked: !!(notationElementsWrapper.currentPreset()
-                                    //                 && notationElementsWrapper.currentPreset().notationFilter
-                                    //                 && notationElementsWrapper.currentPreset().notationFilter.chordSymbols)
-                                    //     onClicked: notationElementsWrapper.toggleKeyInverse("chordSymbols")
-                                    // }
-                                    CheckBox {
-                                        text: qsTr("Other text")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.otherText)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("otherText")
-                                    }
-                                    CheckBox {
-                                        text: qsTr("Articulations")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.articulations)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("articulations")
-                                    }
-                                    CheckBox {
-                                        text: qsTr("Ornaments")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.ornaments)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("ornaments")
-                                    }
-                                    CheckBox {
-                                        text: qsTr("Slurs")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.slurs)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("slurs")
-                                    }
-                                    CheckBox {
-                                        text: qsTr("Ties")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.ties)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("ties")
-                                    }
-                                    // CheckBox {
-                                    //     text: qsTr("Figured bass")
-                                    //     checked: !!(notationElementsWrapper.currentPreset()
-                                    //                 && notationElementsWrapper.currentPreset().notationFilter
-                                    //                 && notationElementsWrapper.currentPreset().notationFilter.figuredBass)
-                                    //     onClicked: notationElementsWrapper.toggleKeyInverse("figuredBass")
-                                    // }
-                                    // CheckBox {
-                                    //     text: qsTr("Ottavas")
-                                    //     checked: !!(notationElementsWrapper.currentPreset()
-                                    //                 && notationElementsWrapper.currentPreset().notationFilter
-                                    //                 && notationElementsWrapper.currentPreset().notationFilter.ottavas)
-                                    //     onClicked: notationElementsWrapper.toggleKeyInverse("ottavas")
-                                    // }
-                                    // CheckBox {
-                                    //     text: qsTr("Pedal lines")
-                                    //     checked: !!(notationElementsWrapper.currentPreset()
-                                    //                 && notationElementsWrapper.currentPreset().notationFilter
-                                    //                 && notationElementsWrapper.currentPreset().notationFilter.pedalLines)
-                                    //     onClicked: notationElementsWrapper.toggleKeyInverse("pedalLines")
-                                    // }
-                                    CheckBox {
-                                        text: qsTr("Other lines")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.otherLines)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("otherLines")
-                                    }
-                                    CheckBox {
-                                        text: qsTr("Arpeggios")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.arpeggios)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("arpeggios")
-                                    }
-                                    CheckBox {
-                                        text: qsTr("Glissandos")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.glissandos)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("glissandos")
-                                    }
-                                    // CheckBox {
-                                    //     text: qsTr("Fretboard diagrams") // fixed typo
-                                    //     checked: !!(notationElementsWrapper.currentPreset()
-                                    //                 && notationElementsWrapper.currentPreset().notationFilter
-                                    //                 && notationElementsWrapper.currentPreset().notationFilter.fretboardDiagrams)
-                                    //     onClicked: notationElementsWrapper.toggleKeyInverse("fretboardDiagrams")
-                                    // }
-                                    // CheckBox {
-                                    //     text: qsTr("Breath marks")
-                                    //     checked: !!(notationElementsWrapper.currentPreset()
-                                    //                 && notationElementsWrapper.currentPreset().notationFilter
-                                    //                 && notationElementsWrapper.currentPreset().notationFilter.breathMarks)
-                                    //     onClicked: notationElementsWrapper.toggleKeyInverse("breathMarks")
-                                    // }
-                                    CheckBox {
-                                        text: qsTr("Tremolos")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.tremolos)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("tremolos")
-                                    }
-                                    CheckBox {
-                                        text: qsTr("Grace notes")
-                                        checked: !!(notationElementsWrapper.currentPreset()
-                                                    && notationElementsWrapper.currentPreset().notationFilter
-                                                    && notationElementsWrapper.currentPreset().notationFilter.graceNotes)
-                                        onClicked: notationElementsWrapper.toggleKeyInverse("graceNotes")
-                                    }
                                     Item { Layout.fillHeight: true }
                                 }
                             }
