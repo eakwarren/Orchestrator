@@ -2515,7 +2515,9 @@ MuseScore {
                                         // Whether the preset has a custom background color
                                         property bool hasCustomColor: {
                                             var p = root.presets && root.presets[model.index];
-                                            return (p && p.backgroundColor && String(p.backgroundColor).length);
+                                            if (!p) return false;
+                                            if (!p.backgroundColor) return false;
+                                            return String(p.backgroundColor).length > 0;
                                         }
 
                                         // Whether this card is selected for editing
@@ -2997,18 +2999,24 @@ MuseScore {
                                         var chosen = String(swatch).toLowerCase();
                                         var themeHex = String(ui.theme.accentColor).toLowerCase();
 
-                                        // If same as theme accent, clear custom override
-                                        if (chosen === themeHex) {
-                                            try { delete p.backgroundColor; } catch(e) { p.backgroundColor = ""; }
-                                        } else {
-                                            p.backgroundColor = swatch;
+                                        p.backgroundColor = swatch;
+
+                                        // Force QML bindings to re-evaluate for the current card
+                                        notifyPresetsMutated();
+                                        refreshPresetsListModel();
+
+                                        // Nudge selection to force delegate refresh (handles first-preset case)
+                                        var uiRef2 = orchestratorWin ? orchestratorWin.rootUIRef : null;
+                                        if (uiRef2 && uiRef2.selectedIndex === sel) {
+                                            uiRef2.selectedIndex = -1;
+                                            Qt.callLater(function () {
+                                                uiRef2.selectedIndex = sel;
+                                            });
                                         }
 
-                                        notifyPresetsMutated();
                                         savePresetsToSettings();
-                                        refreshPresetsListModel();
+                                        popupView.close();
                                     }
-                                    popupView.close();
                                 }
                             }
 
@@ -3026,18 +3034,24 @@ MuseScore {
                                         var chosen = String(swatch).toLowerCase();
                                         var themeHex = String(ui.theme.accentColor).toLowerCase();
 
-                                        // If same as theme accent, clear custom override
-                                        if (chosen === themeHex) {
-                                            try { delete p.backgroundColor; } catch(e) { p.backgroundColor = ""; }
-                                        } else {
-                                            p.backgroundColor = swatch;
+                                        p.backgroundColor = swatch;
+
+                                        // Force QML bindings to re-evaluate for the current card
+                                        notifyPresetsMutated();
+                                        refreshPresetsListModel();
+
+                                        // Nudge selection to force delegate refresh (handles first-preset case)
+                                        var uiRef2 = orchestratorWin ? orchestratorWin.rootUIRef : null;
+                                        if (uiRef2 && uiRef2.selectedIndex === sel) {
+                                            uiRef2.selectedIndex = -1;
+                                            Qt.callLater(function () {
+                                                uiRef2.selectedIndex = sel;
+                                            });
                                         }
 
-                                        notifyPresetsMutated();
                                         savePresetsToSettings();
-                                        refreshPresetsListModel();
+                                        popupView.close();
                                     }
-                                    popupView.close();
                                 }
                             }
 
@@ -3055,18 +3069,24 @@ MuseScore {
                                         var chosen = String(swatch).toLowerCase();
                                         var themeHex = String(ui.theme.accentColor).toLowerCase();
 
-                                        // If same as theme accent, clear custom override
-                                        if (chosen === themeHex) {
-                                            try { delete p.backgroundColor; } catch(e) { p.backgroundColor = ""; }
-                                        } else {
-                                            p.backgroundColor = swatch;
+                                        p.backgroundColor = swatch;
+
+                                        // Force QML bindings to re-evaluate for the current card
+                                        notifyPresetsMutated();
+                                        refreshPresetsListModel();
+
+                                        // Nudge selection to force delegate refresh (handles first-preset case)
+                                        var uiRef2 = orchestratorWin ? orchestratorWin.rootUIRef : null;
+                                        if (uiRef2 && uiRef2.selectedIndex === sel) {
+                                            uiRef2.selectedIndex = -1;
+                                            Qt.callLater(function () {
+                                                uiRef2.selectedIndex = sel;
+                                            });
                                         }
 
-                                        notifyPresetsMutated();
                                         savePresetsToSettings();
-                                        refreshPresetsListModel();
+                                        popupView.close();
                                     }
-                                    popupView.close();
                                 }
                             }
 
@@ -3084,18 +3104,24 @@ MuseScore {
                                         var chosen = String(swatch).toLowerCase();
                                         var themeHex = String(ui.theme.accentColor).toLowerCase();
 
-                                        // If same as theme accent, clear custom override
-                                        if (chosen === themeHex) {
-                                            try { delete p.backgroundColor; } catch(e) { p.backgroundColor = ""; }
-                                        } else {
-                                            p.backgroundColor = swatch;
+                                        p.backgroundColor = swatch;
+
+                                        // Force QML bindings to re-evaluate for the current card
+                                        notifyPresetsMutated();
+                                        refreshPresetsListModel();
+
+                                        // Nudge selection to force delegate refresh (handles first-preset case)
+                                        var uiRef2 = orchestratorWin ? orchestratorWin.rootUIRef : null;
+                                        if (uiRef2 && uiRef2.selectedIndex === sel) {
+                                            uiRef2.selectedIndex = -1;
+                                            Qt.callLater(function () {
+                                                uiRef2.selectedIndex = sel;
+                                            });
                                         }
 
-                                        notifyPresetsMutated();
                                         savePresetsToSettings();
-                                        refreshPresetsListModel();
+                                        popupView.close();
                                     }
-                                    popupView.close();
                                 }
                             }
 
@@ -3113,18 +3139,24 @@ MuseScore {
                                         var chosen = String(swatch).toLowerCase();
                                         var themeHex = String(ui.theme.accentColor).toLowerCase();
 
-                                        // If same as theme accent, clear custom override
-                                        if (chosen === themeHex) {
-                                            try { delete p.backgroundColor; } catch(e) { p.backgroundColor = ""; }
-                                        } else {
-                                            p.backgroundColor = swatch;
+                                        p.backgroundColor = swatch;
+
+                                        // Force QML bindings to re-evaluate for the current card
+                                        notifyPresetsMutated();
+                                        refreshPresetsListModel();
+
+                                        // Nudge selection to force delegate refresh (handles first-preset case)
+                                        var uiRef2 = orchestratorWin ? orchestratorWin.rootUIRef : null;
+                                        if (uiRef2 && uiRef2.selectedIndex === sel) {
+                                            uiRef2.selectedIndex = -1;
+                                            Qt.callLater(function () {
+                                                uiRef2.selectedIndex = sel;
+                                            });
                                         }
 
-                                        notifyPresetsMutated();
                                         savePresetsToSettings();
-                                        refreshPresetsListModel();
+                                        popupView.close();
                                     }
-                                    popupView.close();
                                 }
                             }
 
@@ -3142,18 +3174,24 @@ MuseScore {
                                         var chosen = String(swatch).toLowerCase();
                                         var themeHex = String(ui.theme.accentColor).toLowerCase();
 
-                                        // If same as theme accent, clear custom override
-                                        if (chosen === themeHex) {
-                                            try { delete p.backgroundColor; } catch(e) { p.backgroundColor = ""; }
-                                        } else {
-                                            p.backgroundColor = swatch;
+                                        p.backgroundColor = swatch;
+
+                                        // Force QML bindings to re-evaluate for the current card
+                                        notifyPresetsMutated();
+                                        refreshPresetsListModel();
+
+                                        // Nudge selection to force delegate refresh (handles first-preset case)
+                                        var uiRef2 = orchestratorWin ? orchestratorWin.rootUIRef : null;
+                                        if (uiRef2 && uiRef2.selectedIndex === sel) {
+                                            uiRef2.selectedIndex = -1;
+                                            Qt.callLater(function () {
+                                                uiRef2.selectedIndex = sel;
+                                            });
                                         }
 
-                                        notifyPresetsMutated();
                                         savePresetsToSettings();
-                                        refreshPresetsListModel();
+                                        popupView.close();
                                     }
-                                    popupView.close();
                                 }
                             }
 
@@ -3171,18 +3209,24 @@ MuseScore {
                                         var chosen = String(swatch).toLowerCase();
                                         var themeHex = String(ui.theme.accentColor).toLowerCase();
 
-                                        // If same as theme accent, clear custom override
-                                        if (chosen === themeHex) {
-                                            try { delete p.backgroundColor; } catch(e) { p.backgroundColor = ""; }
-                                        } else {
-                                            p.backgroundColor = swatch;
+                                        p.backgroundColor = swatch;
+
+                                        // Force QML bindings to re-evaluate for the current card
+                                        notifyPresetsMutated();
+                                        refreshPresetsListModel();
+
+                                        // Nudge selection to force delegate refresh (handles first-preset case)
+                                        var uiRef2 = orchestratorWin ? orchestratorWin.rootUIRef : null;
+                                        if (uiRef2 && uiRef2.selectedIndex === sel) {
+                                            uiRef2.selectedIndex = -1;
+                                            Qt.callLater(function () {
+                                                uiRef2.selectedIndex = sel;
+                                            });
                                         }
 
-                                        notifyPresetsMutated();
                                         savePresetsToSettings();
-                                        refreshPresetsListModel();
+                                        popupView.close();
                                     }
-                                    popupView.close();
                                 }
                             }
 
