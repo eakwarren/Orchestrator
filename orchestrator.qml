@@ -2484,6 +2484,10 @@ MuseScore {
 
                             try { ocPrefs.lastSettingsOpen = root.settingsOpen; if (ocPrefs.sync) ocPrefs.sync(); } catch (e) {}
 
+                            if (!root.settingsOpen) {
+                                savePresetsToSettings()
+                            }
+
                             if (!root.settingsOpen && rootUI) {
                                 rootUI.selectedIndex = -1
                             }
