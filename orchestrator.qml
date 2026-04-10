@@ -1904,6 +1904,12 @@ MuseScore {
 
         if (!startSeg) {
             Log.warn(tag, "firePreset: no selection (select something on the sketch staff first)")
+
+            let noSelectionBtn = Interactive.info(
+                    qsTr("Nothing selected in the score."),
+                    qsTr("Tip: Use the Selection filter to customize a selection."),
+                    ["Ok"]
+                    );
             return
         }
 
@@ -1921,13 +1927,13 @@ MuseScore {
                 // Stash what we were about to do so we can resume after OK
                 root.pendingOverwrite = { presetIndex: presetIndex }
 
-                let btn = Interactive.question(
+                let overwriteBtn = Interactive.question(
                         qsTr("Overwrite notes in destination staves?"),
                         qsTr("There are existing notes in %1.").arg(names),
                         ["Yes", "No"]
                         );
 
-                if (!btn || btn === "No") {
+                if (!overwriteBtn || overwriteBtn === "No") {
                     return
                 }
             }
