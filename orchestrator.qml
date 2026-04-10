@@ -766,6 +766,31 @@ MuseScore {
             uiRef.selectedIndex = Math.min(keep, Math.max(0, model.count - 1))
     }
 
+    function commitPresetNameOnly() {
+        var uiRef = orchestratorWin ? orchestratorWin.rootUIRef : null
+        var tf = orchestratorWin ? orchestratorWin.presetTitleFieldRef : null
+        if (!uiRef || !tf) return
+
+        var sel = uiRef.selectedIndex
+        if (sel < 0 || sel >= presets.length) return
+
+        var p = presets[sel]
+        if (!p) return
+
+        var newName = String(tf.text ?? "")
+        if (!newName.length) newName = qsTr("New Preset")
+
+        // Update data model
+        p.name = newName
+
+        // Make bindings and cards refresh immediately
+        notifyPresetsMutated()
+        refreshPresetsListModel()
+
+        // Persist
+        savePresetsToSettings()
+    }
+
     //--------------------------------------------------------------------------------
     // Orchestration Engine
     //--------------------------------------------------------------------------------
@@ -2436,7 +2461,7 @@ MuseScore {
                     FlatButton {
                         id: cardView
                         icon: root.gridView ? IconCode.SPLIT_VIEW_VERTICAL : IconCode.GRID
-                        //toolTip: qsTr("Add preset (placeholder)")
+                        toolTipTitle: qsTr("Toggle preset view")
                         onClicked: {
                             root.gridView = !root.gridView
 
@@ -2446,6 +2471,7 @@ MuseScore {
                     FlatButton {
                         id: settingsBtn
                         icon: IconCode.SETTINGS_COG
+                        toolTipTitle: qsTr("Preset settings")
                         accentButton: root.settingsOpen
                         onClicked: {
                             root.settingsOpen = !root.settingsOpen
@@ -2463,7 +2489,7 @@ MuseScore {
                             }
 
                             const startW  = orchestratorWin.width
-                            const targetW = root.settingsOpen ? (root.baseWidth + 592) : root.baseWidth
+                            const targetW = root.settingsOpen ? (root.baseWidth + 602) : root.baseWidth
 
                             // Temporarily allow animation range, then re-lock to targetW
                             orchestratorWin.minimumWidth = Math.min(startW, targetW)
@@ -2833,7 +2859,7 @@ MuseScore {
                 anchors.leftMargin: settingsSeparator.sideGap
                 anchors.topMargin: 12
                 anchors.bottomMargin: 12
-                spacing: 10
+                spacing: 8
 
                 // Fixed narrow width to keep a clean vertical toolbar look
                 readonly property int toolSize: 28
@@ -2884,21 +2910,22 @@ MuseScore {
                     });
                 }
 
-                FlatButton {
-                    id: presetSaveButton
+                // FlatButton {
+                //     id: presetSaveButton
 
-                    accentButton: true
-                    icon: IconCode.SAVE
-                    //toolTip: qsTr("Add preset (placeholder)")
-                    onClicked: {
-                        saveCurrentPreset()
-                        Log.info(tag, "Preset saved: " + presetTitleField.text)
-                    }
-                }
+                //     accentButton: true
+                //     icon: IconCode.SAVE
+                //     //toolTip: qsTr("Add preset (placeholder)")
+                //     onClicked: {
+                //         saveCurrentPreset()
+                //         Log.info(tag, "Preset saved: " + presetTitleField.text)
+                //     }
+                // }
 
                 FlatButton {
+                    id: newPresetButton
                     icon: IconCode.PLUS
-                    //toolTip: qsTr("Add preset (placeholder)")
+                    toolTipTitle: qsTr("Add preset")
                     onClicked: {
                         // Begin a short transaction: block any live-commit noise and auto-apply paths
                         root.creatingNewPreset = true;              // transaction guard ON
@@ -2953,7 +2980,7 @@ MuseScore {
                 FlatButton {
                     icon: IconCode.ARROW_UP
                     enabled: (rootUI.selectedIndex > 0)
-                    //toolTip: qsTr("Move preset up")
+                    toolTipTitle: qsTr("Move preset up")
                     onClicked: {
                         const i = rootUI.selectedIndex
                         const last = allPresetsModel.count - 1
@@ -2972,7 +2999,7 @@ MuseScore {
                 FlatButton {
                     icon: IconCode.ARROW_DOWN
                     enabled: (rootUI.selectedIndex >= 0 && rootUI.selectedIndex < allPresetsModel.count - 1)
-                    //toolTip: qsTr("Move preset down")
+                    toolTipTitle: qsTr("Move preset down")
                     onClicked: {
                         const i = rootUI.selectedIndex
                         const last = allPresetsModel.count - 1
@@ -2988,6 +3015,7 @@ MuseScore {
 
                 FlatButton {
                     icon: IconCode.BRUSH
+                    toolTipTitle: qsTr("Color preset")
                     onClicked: {
                         var uiRef = orchestratorWin ? orchestratorWin.rootUIRef : null;
                         // var dlg = cardColorDialogComponent.createObject(rootUI, {});
@@ -3275,6 +3303,7 @@ MuseScore {
                             FlatButton {
                                 id: clearColorBtn
                                 icon: IconCode.DELETE_TANK
+                                toolTipTitle: qsTr("Clear color")
                                 width: parent.width
                                 // Only enabled if the current preset HAS a custom backgroundColor
                                 enabled: {
@@ -3310,7 +3339,7 @@ MuseScore {
                     id: copyPresetBtn
                     icon: IconCode.COPY
                     enabled: root.canCopyCurrentPreset()
-                    // toolTip: qsTr("Copy staves and note rows from current preset")
+                    toolTipTitle: qsTr("Copy preset")
                     onClicked: {
                         root.copyCurrentPresetToClipboard()
                     }
@@ -3320,7 +3349,7 @@ MuseScore {
                     id: pastePresetBtn
                     icon: IconCode.PASTE
                     enabled: root.canPasteIntoCurrentPreset()
-                    // toolTip: qsTr("Paste copied staves and note rows into this preset (only when empty)")
+                    toolTipTitle: qsTr("Paste preset")
                     onClicked: {
                         root.pasteClipboardIntoCurrentPreset()
                     }
@@ -3330,6 +3359,7 @@ MuseScore {
                 FlatButton {
                     icon: IconCode.DELETE_TANK
                     enabled: (allPresetsModel.count > 0)
+                    toolTipTitle: qsTr("Delete preset")
                     onClicked: {
                         if (rootUI.selectedIndex >= 0 && rootUI.selectedIndex < allPresetsModel.count) {
                             const n = allPresetsModel.get(rootUI.selectedIndex).name;
@@ -3390,7 +3420,7 @@ MuseScore {
                     Item {
                         id: presetTitleWrap
                         width: stavesBox.width
-                        height: presetSaveButton.height
+                        height: newPresetButton.height
 
                         TextField {
                             id: presetTitleField
@@ -3416,14 +3446,36 @@ MuseScore {
                                 border.color: presetTitleField.activeFocus ? ui.theme.accentColor : ui.theme.strokeColor
                             }
 
-                            onAccepted: {
-                                Log.info(tag, "Preset title accepted: " + presetTitleField.text)
-                            }
                             // Default caret position at the beginning on first render
                             Component.onCompleted: {
                                 cursorPosition = 0
                                 deselect()
                             }
+
+                            onTextEdited: {
+                                // Debounced autosave while typing
+                                presetNameSaveTimer.restart()
+                            }
+
+                            onEditingFinished: {
+                                // Flush immediately when focus leaves the field
+                                presetNameSaveTimer.stop()
+                                root.commitPresetNameOnly()
+                            }
+
+                            onAccepted: {
+                                // Enter pressed: flush immediately
+                                presetNameSaveTimer.stop()
+                                root.commitPresetNameOnly()
+                            }
+                        }
+
+                        // Don't spam disk writes
+                        Timer {
+                            id: presetNameSaveTimer
+                            interval: 350
+                            repeat: false
+                            onTriggered: root.commitPresetNameOnly()
                         }
 
                         // Stretch any extra space while preserving the two fixed-width columns above
@@ -3536,7 +3588,7 @@ MuseScore {
                                                     )
 
                         padding: 0
-                        background: Rectangle { color: ui.theme.textFieldColor }
+                        background: Rectangle { color: ui.theme.backgroundPrimaryColor }
                         ScrollView {
                             id: stavesScroll
                             anchors.fill: parent
@@ -3550,11 +3602,12 @@ MuseScore {
                                 focus: true
                                 model: staffListModel
                                 height: orchestratorWin.height - 10
-                                spacing: 2
+                                spacing: 8
 
                                 delegate: ItemDelegate {
                                     id: rowDelegate
                                     width: ListView.view.width
+                                    height: 30
 
                                     background: Rectangle {
                                         anchors.fill: parent
@@ -3861,7 +3914,7 @@ MuseScore {
                                         leftMargin: 5   // keep external gap equal to RowLayout spacing
                                         verticalCenter: parent.verticalCenter
                                     }
-                                    spacing: listAndButtonsRow.spacing
+                                    spacing: listAndButtonsRow.spacing + 5 // align with note buttons
 
                                     // Left: the note button (multi-select accent)
                                     FlatButton {
