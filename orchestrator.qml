@@ -14,6 +14,7 @@ import QtQuick.Controls 2.15
 // import QtQuick.Dialogs
 import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
+import MuseApi.Interactive 1.0
 import MuseApi.Log 1.0 //support for Log.info|warn|error|debug("tag", "message" + var)
 import Muse.Ui
 import Muse.UiComponents
@@ -27,7 +28,7 @@ MuseScore {
     title: qsTr("Orchestrator")
     description: qsTr("Quickly orchestrate sketches")
     thumbnailName: "orchestrator.png"
-    version: "0.2.3"
+    version: "0.2.4"
 
     categoryCode: qsTr("Composing/arranging tools")
 
@@ -47,6 +48,8 @@ MuseScore {
     property int lastAnchorIndex: -1
     property int currentStaffIdx: -1
     property bool liveCommitEnabled: true
+
+    property var pendingOverwrite: null
 
     // Theme convenience
     readonly property color themeAccent: ui.theme.accentColor
@@ -104,20 +107,6 @@ MuseScore {
             if (ocPrefs.sync) ocPrefs.sync();
         } catch (e) {}
     }
-
-    // Keys controlled by the "All" checkbox (exclude the 'all' key itself)
-    readonly property var notationFilterKeys: [
-        "dynamics","hairpins","otherText",
-        "articulations","ornaments","slurs","ties",
-        "otherLines","arpeggios","glissandos",
-        "tremolos","graceNotes"
-    ]
-    // readonly property var notationFilterKeys: [
-    //     "dynamics","hairpins","fingerings","lyrics","chordSymbols","otherText",
-    //     "articulations","ornaments","slurs","ties","figuredBass","ottavas",
-    //     "pedalLines","otherLines","arpeggios","glissandos","fretboardDiagrams",
-    //     "breathMarks","tremolos","graceNotes"
-    // ]
 
     // Return 0/1/2 for Unchecked / PartiallyChecked / Checked
     function notationAllState(nf) {
@@ -1162,6 +1151,36 @@ MuseScore {
         return out;
     }
 
+    function __trackHasNotesInTickRange(track, startTick, endTick) {
+        // Treat "has notes" as: any CHORD element with at least 1 note.
+        // __collectChordsInTickRangeForTrack() already filters to chords-with-notes.
+        var chords = __collectChordsInTickRangeForTrack(track, startTick, endTick);
+        return !!(chords && chords.length);
+    }
+
+    function __staffHasNotesInTickRange(staffIdx, startTick, endTick) {
+        // Check all 4 voice tracks for this staff.
+        var base = staffBaseTrack(staffIdx);
+        for (var v = 0; v < 4; ++v) {
+            if (__trackHasNotesInTickRange(base + v, startTick, endTick))
+                return true;
+        }
+        return false;
+    }
+
+    function __detectOverwriteStaffIds(staffIds, startTick, endTick) {
+        // Returns subset of staffIds that contain any notes in the range.
+        var out = [];
+        if (!staffIds || !staffIds.length) return out;
+        for (var i = 0; i < staffIds.length; ++i) {
+            var sid = Number(staffIds[i]);
+            if (sid < 0 || isNaN(sid)) continue;
+            if (__staffHasNotesInTickRange(sid, startTick, endTick))
+                out.push(sid);
+        }
+        return out;
+    }
+
     function __getTieBack(note) {
         try { if (note && note.tieBack) return note.tieBack; } catch (e) {}
         try { if (note && note.tieBackward) return note.tieBackward; } catch (e2) {}
@@ -1835,7 +1854,9 @@ MuseScore {
     }
 
     // Public entry point: fire preset by index (normal-mode card click)
-    function firePreset(presetIndex) {
+    function firePreset(presetIndex, opts) {
+        opts = opts || {}
+
         if (!curScore) {
             Log.error(tag, "firePreset: no curScore")
             return
@@ -1866,6 +1887,26 @@ MuseScore {
 
         var targetStaffIds = __staffIdsWithAnyActive(p)
 
+        var skipOverwritePrompt = !!opts.skipOverwritePrompt;
+        if (!skipOverwritePrompt) {
+            var overwriteStaffIds = __detectOverwriteStaffIds(targetStaffIds, startTick, endTick)
+            if (overwriteStaffIds.length) {
+                var names = staffNamesFromIndices(overwriteStaffIds)
+
+                // Stash what we were about to do so we can resume after OK
+                root.pendingOverwrite = { presetIndex: presetIndex }
+
+                let btn = Interactive.question(
+                        qsTr("Overwrite notes in destination staves?"),
+                        qsTr("There are existing notes in:\n%1").arg(names),
+                        ["Yes", "No"]
+                        );
+
+                if (!btn || btn === "No") {
+                    return
+                }
+            }
+        }
 
         Log.info(tag, "firePreset startTick=" + startTick + " endTick=" + endTick +
                  " targetStaffIds=" + JSON.stringify(targetStaffIds))
@@ -4138,7 +4179,7 @@ MuseScore {
 
                             // Title
                             Label {
-                                text: qsTr("Delete preset")
+                                text: qsTr("Delete preset?")
                                 font.pixelSize: 16
                                 font.bold: true
                                 color: ui.theme.fontPrimaryColor
