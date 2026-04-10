@@ -30,7 +30,7 @@ MuseScore {
     thumbnailName: "orchestrator.png"
     version: "0.2.4"
 
-    categoryCode: qsTr("Composing/arranging tools")
+    categoryCode: "composing-arranging-tools"
 
     property string tag: root.title
 
