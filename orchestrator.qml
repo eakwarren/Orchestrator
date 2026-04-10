@@ -1891,14 +1891,14 @@ MuseScore {
         if (!skipOverwritePrompt) {
             var overwriteStaffIds = __detectOverwriteStaffIds(targetStaffIds, startTick, endTick)
             if (overwriteStaffIds.length) {
-                var names = staffNamesFromIndices(overwriteStaffIds)
+                var names = staffInstrumentNamesFromIndices(overwriteStaffIds)
 
                 // Stash what we were about to do so we can resume after OK
                 root.pendingOverwrite = { presetIndex: presetIndex }
 
                 let btn = Interactive.question(
                         qsTr("Overwrite notes in destination staves?"),
-                        qsTr("There are existing notes in:\n%1").arg(names),
+                        qsTr("There are existing notes in %1.").arg(names),
                         ["Yes", "No"]
                         );
 
