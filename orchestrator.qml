@@ -1,5 +1,5 @@
 //===============================================================================
-// Orchestrator - Quickly orchestrate sketches in MuseScore Studio
+// Orchestrator - Preset system to quickly orchestrate sketches in MuseScore
 //
 // Copyright (C) 2026 Eric Warren (eakwarren)
 //
@@ -11,11 +11,10 @@
 
 import QtQuick 2.15
 import QtQuick.Controls 2.15
-// import QtQuick.Dialogs
 import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
 import MuseApi.Interactive 1.0
-import MuseApi.Log 1.0 //support for Log.info|warn|error|debug("tag", "message" + var)
+import MuseApi.Log 1.0
 import Muse.Ui
 import Muse.UiComponents
 import MuseScore 3.0
@@ -26,57 +25,60 @@ MuseScore {
     id: root
 
     title: qsTr("Orchestrator")
-    description: qsTr("Quickly orchestrate sketches")
-    thumbnailName: "orchestrator.png"
-    version: "0.2.4"
-
+    description: qsTr("Preset system to quickly orchestrate sketches in MuseScore")
     categoryCode: "composing-arranging-tools"
+    thumbnailName: "orchestrator.png"
+    version: "0.2.5"
 
-    property string tag: root.title
+    //--------------------------------------------------------------------------------
+    // Log Engine
+    //--------------------------------------------------------------------------------
 
+    property string logLevel: "debug" // "normal" | "verbose" | "debug"
+    property string tag: root.title.toUpperCase()
 
-    // Sprint 1: window base width and settings panel animation
+    function __canLog(level) {
+        var order = ({ normal: 0, verbose: 1, debug: 2 })
+        var cur = order[String(root.logLevel || "debug")]
+        var want = order[String(level || "normal")]
+        if (cur === undefined) cur = 2
+        if (want === undefined) want = 0
+        return cur >= want
+    }
+
+    function __logInfo(message)  { if (__canLog("normal")) Log.info(tag, String(message)) }
+    function __logWarn(message)  { if (__canLog("verbose")) Log.warn(tag, String(message)) }
+    function __logDebug(message) { if (__canLog("debug")) Log.debug(tag, String(message)) }
+    function __logError(message) { Log.error(tag, String(message)) }  // always show errors
+
+    //--------------------------------------------------------------------------------
+    // JSON Preset Array & UI Engine
+    //--------------------------------------------------------------------------------
+
     property int baseWidth: 300
     property bool settingsOpen: false
     property bool gridView: false
-    property var orchestratorWin: null // runtime-created Window instance
-
-    // ---- Sprint 1: Staves list state (ported from Keyswitch Creator) ----
-    // Current multi-select state (staff index -> true)
+    property var orchestratorWin: null
     property var selectedStaff: ({})
     property int selectedCountProp: 0
     property int lastAnchorIndex: -1
     property int currentStaffIdx: -1
     property bool liveCommitEnabled: true
-
     property var pendingOverwrite: null
 
-    // Theme convenience
-    readonly property color themeAccent: ui.theme.accentColor
-    property color pluginAccent: (ocPrefs.accentHex && ocPrefs.accentHex.length) ? ocPrefs.accentHex : ui.theme.accentColor
-    // Put near the top level of your plugin
+    // Theme
     property bool isDarkTheme: (function () {
         if (ui && ui.theme && ui.theme.isDark !== undefined) {
             const v = ui.theme.isDark
             return (typeof v === "function") ? !!v() : !!v
         }
-        // Fallback: classify by luminance of the background color
-        // var c = ui && ui.theme ? ui.theme.backgroundPrimaryColor : "black"
-        // function lin(x) { return (x <= 0.04045) ? (x / 12.92) : Math.pow((x + 0.055) / 1.055, 2.4) }
-        // var r = lin(c.r || 0), g = lin(c.g || 0), b = lin(c.b || 0)
-        // var Y = 0.2126 * r + 0.7152 * g + 0.0722 * b
-        // return Y < 0.5
     })
 
-    // ---- Orchestrator Presets: persistence + helpers (modeled after KSC) ------------------
-    // Store presets JSON via QML Settings (on-disk per-user config)
+    // Store preset JSON via QML Settings (on-disk per user config)
     Settings {
         id: ocPrefs
         category: root.title
-        // Single string holds our presets array as JSON
         property string presetsJSON: ""
-        property string accentHex: ""
-
         property bool lastSettingsOpen: false
         property int  lastWindowHeight: 0
         property bool lastGridView: false
@@ -92,6 +94,14 @@ MuseScore {
     property bool suppressApplyPreset: false
     property bool creatingNewPreset: false
 
+    // Persist 1-across vs 2-across preset layout
+    onGridViewChanged: {
+        try {
+            ocPrefs.lastGridView = !!gridView;
+            if (ocPrefs.sync) ocPrefs.sync();
+        } catch (e) {}
+    }
+
     // Persist Settings panel open/closed
     onSettingsOpenChanged: {
         try {
@@ -100,41 +110,7 @@ MuseScore {
         } catch (e) {}
     }
 
-    // Persist 1-up vs 2-up layout
-    onGridViewChanged: {
-        try {
-            ocPrefs.lastGridView = !!gridView;
-            if (ocPrefs.sync) ocPrefs.sync();
-        } catch (e) {}
-    }
-
-    // Return 0/1/2 for Unchecked / PartiallyChecked / Checked
-    function notationAllState(nf) {
-        if (!nf) return 0
-        var total = notationFilterKeys.length
-        var enabled = 0
-        for (var i = 0; i < total; ++i) if (nf[notationFilterKeys[i]]) enabled++
-        if (enabled === 0) return Qt.Unchecked
-        if (enabled === total) return Qt.Checked
-        return Qt.PartiallyChecked
-    }
-
-    // Set all children on/off and keep nf.all in sync
-    function setNotationAll(nf, on) {
-        if (!nf) return
-        for (var i = 0; i < notationFilterKeys.length; ++i)
-            nf[notationFilterKeys[i]] = !!on
-        nf.all = !!on
-    }
-
-    // Recompute nf.all from children
-    function syncNotationAll(nf) {
-        if (!nf) return
-        var st = notationAllState(nf)
-        nf.all = (st === Qt.Checked)
-    }
-
-    // Pitch offset <-> dropdown index mapping (0..48, where 24 == 0 semitones)
+    // Pitch offset <-> dropdown index mapping (0..48, 24 == 0 semitones)
     function pitchValueToIndex(v) {
         var n = Number(v) || 0
         if (n > 24) n = 24
@@ -152,52 +128,80 @@ MuseScore {
         return -(i - 24)
     }
 
+    function __ensurePresetStaffMeta(presetObj) {
+        if (!presetObj.staffMetaByStaffIdx)
+            presetObj.staffMetaByStaffIdx = {}
+        return presetObj.staffMetaByStaffIdx
+    }
+
+    function __instrumentMetaForStaff(staffIdx, tick) {
+        var out = {
+            instrumentId: "",
+            musicXmlId: ""
+        }
+
+        var p = partForStaff(staffIdx)
+        if (!p)
+            return out
+
+        var t = Number(tick || 0)
+        var inst = null
+
+        try {
+            if (p.instrumentAtTick)
+                inst = p.instrumentAtTick(t)
+        } catch (e0) {}
+
+        if (!inst) {
+            try {
+                if (p.instruments && p.instruments.length)
+                    inst = p.instruments[0]
+            } catch (e1) {}
+        }
+
+        if (!inst)
+            return out
+
+        try { out.instrumentId = String(inst.instrumentId || "") } catch (e2) {}
+        try { out.musicXmlId = String(inst.musicXmlId || "") } catch (e3) {}
+
+        return out
+    }
+
+    function __capturePresetStaffMeta(presetObj, staffIdx, tick) {
+        if (!presetObj || staffIdx === undefined || staffIdx === null || staffIdx < 0)
+            return
+
+        var metaMap = __ensurePresetStaffMeta(presetObj)
+        metaMap[String(staffIdx)] = __instrumentMetaForStaff(staffIdx, tick)
+    }
+
     function defaultRows() {
         var rows = []
         for (var i = 0; i < 8; ++i)
             rows.push({ active: false, offset: 0, voice: 0 })
         return rows
     }
-
-    // Default notation elements filter (all enabled by default)
-    function defaultNotationFilter() {
-        return {
-            all: true,
-            dynamics: true,
-            hairpins: true,
-            /*fingerings: true,
-            lyrics: true,
-            chordSymbols: true,*/   // Harmony
-            otherText: true,      // Staff/System/Tempo text, etc.
-            articulations: true,  // incl. fermatas
-            ornaments: true,
-            slurs: true,
-            ties: true,
-            // figuredBass: true,
-            // ottavas: true,
-            // pedalLines: true,
-            otherLines: true,     // generic text lines / voltas etc. (subject to later scoping)
-            arpeggios: true,
-            glissandos: true,
-            // fretboardDiagrams: true,
-            // breathMarks: true,
-            tremolos: true,
-            graceNotes: true
+    function hasAnyActiveRows(rows) {
+        if (!rows || !rows.length) return false;
+        for (var i = 0; i < rows.length; ++i) {
+            if (rows[i] && rows[i].active) return true;
         }
+        return false;
     }
 
     function newPresetObject(name) {
         return {
-            id: String(Date.now()) + "_" + Math.floor(Math.random() * 100000),
+            id: String(Date.now()) + "-" + Math.random().toString(16).slice(2),
             name: String(name ?? qsTr("New Preset")),
             staves: [],
             noteRowsByStaff: {},
-            backgroundColor: "",
-            notationFilter: defaultNotationFilter()
+            staffMetaByStaffIdx: {},
+            backgroundColor: ""
         }
     }
 
-    // Selected staff indices (sorted) from the left staves list
+    // Selected staff indices (sorted) from the staves list
     function getSelectedStaffArray() {
         var out = []
         for (var k in selectedStaff) {
@@ -227,11 +231,12 @@ MuseScore {
         return names.join(", ")
     }
 
-    // Serialize / deserialize the in-memory presets
+    // In-memory presets
     function loadPresetsFromSettings() {
         try {
             var s = String(ocPrefs.presetsJSON || "")
             var parsed = s.length ? JSON.parse(s) : []
+            Log.info(tag, "ocPrefs presets JSON: " + s)
             if (!parsed || !parsed.length) parsed = [ newPresetObject(qsTr("New Preset")) ]
             presets = parsed
         } catch (e) {
@@ -247,19 +252,9 @@ MuseScore {
             Log.error(tag, "Failed to save presets: " + String(e))
         }
     }
-
     function notifyPresetsMutated() {
         // Reassign to a fresh array reference so QML bindings re-evaluate.
         presets = presets.slice(0);
-    }
-
-    // Returns true if any row has active === true
-    function hasAnyActiveRows(rows) {
-        if (!rows || !rows.length) return false;
-        for (var i = 0; i < rows.length; ++i) {
-            if (rows[i] && rows[i].active) return true;
-        }
-        return false;
     }
 
     // --- Clipboard + helpers ----------------------------------------------------
@@ -317,15 +312,17 @@ MuseScore {
         var uiRef = orchestratorWin ? orchestratorWin.rootUIRef : null;
         if (!uiRef || uiRef.selectedIndex < 0 || uiRef.selectedIndex >= presets.length)
             return;
-
         var p = presets[uiRef.selectedIndex];
         if (!p || !p.noteRowsByStaff) return;
 
-        var clip = { staves: [], noteRowsByStaff: {} };
+        var clip = {
+            staves: [],
+            noteRowsByStaff: {},
+            staffMetaByStaffIdx: {}
+        };
+
         clip.name = String(p.name || "");
         clip.backgroundColor = p.backgroundColor ? colorToHex(p.backgroundColor) : "";
-
-        clip.notationFilter = p.notationFilter ? JSON.parse(JSON.stringify(p.notationFilter)) : defaultNotationFilter();
 
         // Only copy staves that actually have any active rows
         var ids = __staffIdsWithAnyActive(p);
@@ -334,7 +331,15 @@ MuseScore {
         for (var i = 0; i < ids.length; ++i) {
             var sid = ids[i];
             clip.noteRowsByStaff[sid] = __deepCloneRowsArray(p.noteRowsByStaff[sid]);
+
+            if (p.staffMetaByStaffIdx && p.staffMetaByStaffIdx[String(sid)]) {
+                clip.staffMetaByStaffIdx[String(sid)] = {
+                    instrumentId: String(p.staffMetaByStaffIdx[String(sid)].instrumentId || ""),
+                    musicXmlId: String(p.staffMetaByStaffIdx[String(sid)].musicXmlId || "")
+                };
+            }
         }
+
         presetClipboard = clip;
     }
 
@@ -349,15 +354,29 @@ MuseScore {
             // Guard: only allow paste into an empty preset
             return;
         }
+
         if (!p.noteRowsByStaff) p.noteRowsByStaff = {};
+        if (!p.staffMetaByStaffIdx) p.staffMetaByStaffIdx = {};
 
         // Apply clipboard to the preset (deep clone)
         p.staves = presetClipboard.staves ? presetClipboard.staves.slice(0) : [];
+
         if (presetClipboard.noteRowsByStaff) {
             for (var sidKey in presetClipboard.noteRowsByStaff) {
                 if (!presetClipboard.noteRowsByStaff.hasOwnProperty(sidKey)) continue;
                 var srcRows = presetClipboard.noteRowsByStaff[sidKey] || [];
                 p.noteRowsByStaff[sidKey] = __deepCloneRowsArray(srcRows);
+            }
+        }
+
+        if (presetClipboard.staffMetaByStaffIdx) {
+            for (var metaKey in presetClipboard.staffMetaByStaffIdx) {
+                if (!presetClipboard.staffMetaByStaffIdx.hasOwnProperty(metaKey)) continue;
+                var meta = presetClipboard.staffMetaByStaffIdx[metaKey] || {};
+                p.staffMetaByStaffIdx[metaKey] = {
+                    instrumentId: String(meta.instrumentId || ""),
+                    musicXmlId: String(meta.musicXmlId || "")
+                };
             }
         }
 
@@ -372,13 +391,6 @@ MuseScore {
             p.backgroundColor = presetClipboard.backgroundColor;   // hex → parsed automatically
         } else {
             try { delete p.backgroundColor; } catch(e) { p.backgroundColor = ""; }
-        }
-
-        // Restore notationFilter (if present)
-        if (presetClipboard.notationFilter) {
-            p.notationFilter = JSON.parse(JSON.stringify(presetClipboard.notationFilter));
-        } else {
-            p.notationFilter = defaultNotationFilter();
         }
 
         // Reflect the new name in the title field immediately
@@ -412,14 +424,14 @@ MuseScore {
                 : "#" + hex(r) + hex(g) + hex(b);          // RGB form
     }
 
-    // Instrument-only name (no ": Staff N") for use on the preset card
+    // Instrument name (no ": Staff N") on the preset card
     function staffInstrumentNameByIdx(staffIdx) {
         var p = partForStaff(staffIdx);
         var nm = nameForPart(p, 0) || qsTr("Unknown instrument");
         return cleanName(nm);
     }
 
-    // Join instrument names for the preset card (no ": Staff N")
+    // Join instrument names for the preset card
     function staffInstrumentNamesFromIndices(arr) {
         if (!arr || !arr.length) return "";
         var names = [];
@@ -538,13 +550,14 @@ MuseScore {
         if (sid >= 0) {
             var rows = [];
             for (var i = 0; i < 8; ++i) {
-                var active  = nb ? !!nb.selectedNotes[i] : false;
-                var voice   = Number(nb && nb.voiceByRow ? (nb.voiceByRow[i] ?? 0) : 0);
+                var active = nb ? !!nb.selectedNotes[i] : false;
+                var voice = Number(nb && nb.voiceByRow ? (nb.voiceByRow[i] ?? 0) : 0);
                 var pitchIx = (nb && nb.pitchIndexByRow && nb.pitchIndexByRow[i] !== undefined) ? nb.pitchIndexByRow[i] : 24;
-                var offset  = pitchIndexToValue(pitchIx);
+                var offset = pitchIndexToValue(pitchIx);
                 rows.push({ active: active, offset: offset, voice: voice });
             }
             p.noteRowsByStaff[sid] = rows;
+            __capturePresetStaffMeta(p, sid, 0);
         }
     }
 
@@ -588,7 +601,7 @@ MuseScore {
         }
     }
 
-    // Commit current UI rows to the *current preset* for all *selected staves*
+    // Commit current UI rows to the current preset for all selected staves
     // (or the focused staff if none are selected). Then notify and refresh the cards.
     function commitNoteRowsToPresetLive() {
         // New guards: never commit while a new preset is being created, or when live commits are disabled
@@ -631,9 +644,14 @@ MuseScore {
                 for (var i = 0; i < rows.length; ++i)
                     cloned.push({ active: rows[i].active, offset: rows[i].offset, voice: rows[i].voice });
                 p.noteRowsByStaff[sId] = cloned;
+                __capturePresetStaffMeta(p, sId, 0);
             } else {
                 // No active rows -> remove assignment for this staff
                 try { delete p.noteRowsByStaff[sId]; } catch (e) {}
+                try {
+                    if (p.staffMetaByStaffIdx)
+                        delete p.staffMetaByStaffIdx[String(sId)];
+                } catch (e2) {}
             }
         }
 
@@ -791,35 +809,98 @@ MuseScore {
         savePresetsToSettings()
     }
 
+    function stripHtmlTags(s) {
+        return String(s || "").replace(/\<[^>]*\>/g, "")
+    }
+
+    function decodeHtmlEntities(s) {
+        var t = String(s || "")
+        t = t.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&#39;/g, "'")
+        t = t.replace(/&#([0-9]+);/g, function(_, n) { return String.fromCharCode(parseInt(n, 10) || 0) })
+        t = t.replace(/&#x([0-9a-fA-F]+);/g, function(_, h) { return String.fromCharCode(parseInt(h, 16) || 0) })
+        return t
+    }
+
+    function cleanName(s) {
+        return String(s || '').split('\r\n').join(' ').split('\n').join(' ')
+    }
+
+    function normalizeUiText(s) {
+        return cleanName(decodeHtmlEntities(stripHtmlTags(s)))
+    }
+
+    function nameForPart(p, tick) {
+        if (!p) return ''
+        var nm = (p.longName && p.longName.length) ? p.longName
+                                                   : (p.partName && p.partName.length) ? p.partName
+                                                                                       : (p.shortName && p.shortName.length) ? p.shortName : ''
+        if (!nm && p.instrumentAtTick) {
+            var inst = p.instrumentAtTick(tick || 0)
+            if (inst && inst.longName && inst.longName.length) nm = inst.longName
+        }
+        return normalizeUiText(nm)
+    }
+
+    function partForStaff(staffIdx) {
+        if (!curScore || !curScore.parts) return null
+        var t = staffBaseTrack(staffIdx)
+        for (var i = 0; i < curScore.parts.length; ++i) {
+            var p = curScore.parts[i]
+            if (t >= p.startTrack && t < p.endTrack) return p
+        }
+        return null
+    }
+
+    function staffNameByIdx(staffIdx) {
+        for (var i = 0; i < staffListModel.count; ++i) {
+            var item = staffListModel.get(i)
+            if (item && item.idx === staffIdx) return cleanName(item.name)
+        }
+        var base = nameForPart(partForStaff(staffIdx), 0) || qsTr("Unknown instrument")
+        return cleanName(base + ': ' + qsTr('Staff %1').arg(1))
+    }
+
+    function buildStaffListModel() {
+        staffListModel.clear()
+        if (curScore && curScore.parts) {
+            for (var pIdx = 0; pIdx < curScore.parts.length; ++pIdx) {
+                var p = curScore.parts[pIdx]
+                var baseStaff = Math.floor(p.startTrack / 4)
+                var numStaves = Math.floor((p.endTrack - p.startTrack) / 4)
+                var partName = nameForPart(p, 0)
+                var cleanPart = cleanName(partName)
+                for (var sOff = 0; sOff < numStaves; ++sOff) {
+                    var staffIdx = baseStaff + sOff
+                    var display = cleanPart + ': ' + qsTr('Staff %1').arg(sOff + 1)
+                    staffListModel.append({ idx: staffIdx, name: display })
+                }
+            }
+        }
+        // Do not auto-select any staff on open
+        var sl = orchestratorWin ? orchestratorWin.staffListRef : null
+        if (sl) sl.currentIndex = -1
+        clearSelection()
+    }
+
     //--------------------------------------------------------------------------------
     // Orchestration Engine
-    //--------------------------------------------------------------------------------
-
+    //
     // cmd() strings must match MuseScore command names
     // see src/notationscene/internal/notationuiactions.cpp
-    function __doCopy() { cmd("action://copy") }
-    function __doPaste() { cmd("action://paste") }
-    function __doDelete() { cmd("action://delete") }
-    function __escape()   { cmd("escape") } //action://notation/cancel
+    //--------------------------------------------------------------------------------
 
-    // Best-effort tie command (different builds name it differently)
-    function __doAddTieBestEffort() {
-        // Try a small set of likely command names
-        var candidates = [
-                    "tie",
-                    "add-tie",
-                    "action://notation/tie",
-                    "action://tie"
-                ];
+    function __doCopy()                 { cmd("action://copy") }
+    function __doPaste()                { cmd("action://paste") }
 
-        for (var i = 0; i < candidates.length; ++i) {
-            try {
-                cmd(candidates[i]);
-                // We can't reliably detect success, but the dispatcher log will show attempts.
-                return;
-            } catch (e) {}
-        }
-    }
+    // --- Command primitives: navigation / selection -----------------------------
+
+    function __doMoveLeft()             { cmd("notation-move-left") }
+    function __doMoveRight()            { cmd("notation-move-right") }
+    function __doUpChord()              { cmd("up-chord") }
+    function __doDownChord()            { cmd("down-chord") }
+    function __doTopChord()             { cmd("top-chord") }
+    function __doBottomChord()          { cmd("bottom-chord") }
+    function __doEscape()               { cmd("action://cancel") }
 
     function __clearScoreSelection() {
         try {
@@ -828,137 +909,254 @@ MuseScore {
         } catch (e) {}
     }
 
-    function __pitchUp()         { cmd("pitch-up") }
-    function __pitchDown()       { cmd("pitch-down") }
-    function __pitchUpOctave()   { cmd("pitch-up-octave") }
-    function __pitchDownOctave() { cmd("pitch-down-octave") }
+    // --- Command primitives: mutation -------------------------------------------
+
+    function __doDelete()               { cmd("action://delete") }
+    function __doPitchUp()              { cmd("pitch-up") }
+    function __doPitchDown()            { cmd("pitch-down") }
+    function __doPitchUpOctave()        { cmd("pitch-up-octave") }
+    function __doPitchDownOctave()      { cmd("pitch-down-octave") }
+    function __doPitchUpDiatonic()      { cmd("pitch-up-diatonic") }
+    function __doPitchDownDiatonic()    { cmd("pitch-down-diatonic") }
+    function __doFlip()                 { cmd("flip") }
+
+    function __applyPitchOffsetCommands(offset) {
+        var steps = Number(offset || 0)
+        while (steps >= 12) {
+            __doPitchUpOctave()
+            steps -= 12
+        }
+        while (steps <= -12) {
+            __doPitchDownOctave()
+            steps += 12
+        }
+        while (steps > 0) {
+            __doPitchUp()
+            steps -= 1
+        }
+        while (steps < 0) {
+            __doPitchDown()
+            steps += 1
+        }
+    }
+
+    function __doSetVoice1()            { cmd("voice-1") } // preferred - keeps dynamics with voice and doesn't select other voices
+    function __doSetVoice2()            { cmd("voice-2") }
+    function __doSetVoice3()            { cmd("voice-3") }
+    function __doSetVoice4()            { cmd("voice-4") }
 
     function __setVoice(v) {
-        // API-native voice index: 0..3 (#track % 4)
+        // API index: 0..3 (#track % 4)
         var vv = Number(v ?? 0)
         if (vv < 0) vv = 0
         if (vv > 3) vv = 3
-        // command names are voice-1..voice-4, so convert 0..3 -> 1..4
+        // convert API index to UI index 0..3 => 1..4
         cmd("voice-" + (vv + 1))
     }
 
-    function __noteVoiceIndex(note) {
-        if (!note) return -1
-        // Prefer track%4 because that’s the real routing; voice may be absent or stale.
-        try {
-            if (note.track !== undefined && note.track !== null)
-                return Number(note.track) % 4
-        } catch (e0) {}
-        try {
-            if (note.voice !== undefined && note.voice !== null)
-                return Number(note.voice)
-        } catch (e1) {}
-        return -1
+    // --- Row labeling & diagnostics (UI / warnings only) ------------------------
+
+    function __rowLabel(rowIndex) {
+        if (rowIndex === 0) return "T" // Top
+        if (rowIndex === 6) return "S" // Second
+        if (rowIndex === 7) return "B" // Bottom
+        return String(rowIndex)
     }
 
-    function __addNoteAtTickInVoice(staffIdx, tick, voiceIdx, pitch, durationFrac) {
-        if (!curScore) return false
+    function __rowLabelList(rowIndices) {
+        var out = []
 
-        var v = Number(voiceIdx ?? 0)
-        if (v < 0) v = 0
-        if (v > 3) v = 3
+        if (!rowIndices || !rowIndices.length)
+            return out
 
-        var t = Number(tick ?? 0)
-        if (isNaN(t) || t < 0) t = 0
-
-        var c = curScore.newCursor()
-        if (!c) return false
-
-        // IMPORTANT: Seek on voice 0 first so the cursor can always land on a real segment.
-        // Many scores have no elements in voice 1 yet, so seeking on that track can fail.
-        c.track = staffBaseTrack(staffIdx) // voice 0 anchor track
-
-        if (!__seekCursorToTick(c, t)) {
-            Log.warn(tag, "__addNoteAtTickInVoice: seek failed staffIdx=" + staffIdx + " voice=" + v + " tick=" + t)
-            return false
+        for (var i = 0; i < rowIndices.length; ++i) {
+            out.push(__rowLabel(rowIndices[i]))
         }
 
-        // Now switch voice WITHOUT moving the segment.
-        // Cursor.setVoice() changes track but keeps location.
-        try { c.voice = v } catch (eV) {
-            try { c.track = staffBaseTrack(staffIdx) + v } catch (eT) {}
-        }
+        return out
+    }
 
-        // Ensure duration is set
-        try {
-            if (durationFrac && durationFrac.numerator !== undefined && durationFrac.denominator !== undefined) {
-                c.setDuration(durationFrac.numerator, durationFrac.denominator)
-            } else {
-                c.setDuration(1, 4)
-            }
-        } catch (eDur) {
-            c.setDuration(1, 4)
-        }
+    function __rowLongLabel(rowIndex) {
+        if (rowIndex === 0) return "Top note"
+        if (rowIndex === 6) return "Second note"
+        if (rowIndex === 7) return "Bottom note"
+        return __rowLabel(rowIndex)
+    }
 
-        // Add the note
-        // Prefer direct note entry at the current segment.
-        // If there's no chord yet in this voice at this tick, addToChord MUST be false.
-        try {
-            var addToChord = true
-            try {
-                if (!c.element)
-                    addToChord = false
-                else if (c.element.type === Element.REST)
-                    addToChord = false
-            } catch (eType) {}
+    function __recordIgnoredRows(warningSink, staffIdx, tick, noteCount, rowIndices) {
+        if (!warningSink || !rowIndices || !rowIndices.length)
+            return
+        warningSink.push({
+                             staffIdx: Number(staffIdx),
+                             tick: Number(tick || 0),
+                             noteCount: Number(noteCount || 0),
+                             rows: rowIndices.slice(0)
+                         })
+    }
 
-            c.addNote(Number(pitch), addToChord)
+    function __showIgnoredRowWarnings(warnings) {
+        if (!warnings || !warnings.length)
+            return
 
-            Log.debug(tag, "__addNoteAtTickInVoice: after addNote tick=" + String(c.tick) + " elementType=" + String(c.element ? c.element.type : "null"))
+        var grouped = ({})
+        for (var i = 0; i < warnings.length; ++i) {
+            var w = warnings[i]
+            var key = String(w.staffIdx) + "|" + String(w.noteCount)
 
-            return true
-
-        } catch (eAdd0) {
-            // Fallback: some builds may require a CR anchor. If we add a rest, it might advance,
-            // so immediately return to the target tick before adding the note.
-            try {
-                if (!c.element) {
-                    c.addRest()
-                    // Restore cursor to the intended tick (avoid beat-2 shift)
-                    c.track = staffBaseTrack(staffIdx) // voice 0 anchor
-                    __seekCursorToTick(c, t)
-                    try { c.voice = v } catch (eV2) { c.track = staffBaseTrack(staffIdx) + v }
-
-                    // Now replace the rest with the note
-                    c.addNote(Number(pitch), false)
-                    return true
+            if (!grouped[key]) {
+                grouped[key] = {
+                    staffIdx: w.staffIdx,
+                    noteCount: w.noteCount,
+                    rows: ({})
                 }
-            } catch (eAdd1) {}
+            }
 
-            Log.warn(tag,
-                     "__addNoteAtTickInVoice: addNote failed pitch=" + pitch +
-                     " tick=" + t + " voice=" + v +
-                     " err=" + String(eAdd0))
-            return false
+            for (var r = 0; r < w.rows.length; ++r) {
+                grouped[key].rows[String(w.rows[r])] = true
+            }
         }
+
+        var lines = []
+        for (var key in grouped) {
+            if (!grouped.hasOwnProperty(key))
+                continue
+
+            var g = grouped[key]
+            var rowNums = []
+
+            for (var rk in g.rows) {
+                if (g.rows.hasOwnProperty(rk))
+                    rowNums.push(Number(rk))
+            }
+
+            rowNums.sort(function(a, b) { return a - b })
+
+            var names = []
+            for (var j = 0; j < rowNums.length; ++j) {
+                var rowIndex = rowNums[j]
+                if (rowIndex === 0) names.push("Top note")
+                else if (rowIndex === 6) names.push("Second note")
+                else if (rowIndex === 7) names.push("Bottom note")
+                else names.push(__rowLabel(rowIndex))
+            }
+
+            lines.push(
+                        staffInstrumentNameByIdx(g.staffIdx) +
+                        ": ignored " +
+                        names.join(", ") +
+                        " on " + g.noteCount + "-note chords."
+                        )
+        }
+
+        if (!lines.length)
+            return
+
+        Interactive.info(
+                    qsTr("Some preset rows were ignored."),
+                    lines.join("\n"),
+                    [qsTr("Ok")]
+                    )
     }
 
-    function __dbgElement(el) {
-        if (!el) return "null"
-        var t = (el.type !== undefined) ? String(el.type) : "?"
-        var tick = "?"
-        try { tick = (el.segment && el.segment.tick !== undefined) ? String(el.segment.tick) : (el.tick !== undefined ? String(el.tick) : "?") } catch(e) {}
-        var pitch = "?"
-        try { pitch = (el.pitch !== undefined) ? String(el.pitch) : "?" } catch(e2) {}
-        return "type=" + t + " tick=" + tick + " pitch=" + pitch
+    // --- Selection & Cursor helpers (planning / anchoring only) -----------------
+
+    function staffBaseTrack(staffIdx) {
+        return staffIdx * 4
     }
 
-    function __dbgSelection() {
-        if (!curScore || !curScore.selection) return "selection=null"
-        var s = curScore.selection
-        // We don't know which properties your build exposes, so probe safely.
-        var parts = []
-        try { parts.push("isRange=" + String(!!s.isRange)) } catch(e0) {}
-        try { parts.push("startTick=" + String(s.startSegment && s.startSegment.tick !== undefined ? s.startSegment.tick : "?")) } catch(e1) {}
-        try { parts.push("endTick=" + String(s.endSegment && s.endSegment.tick !== undefined ? s.endSegment.tick : "?")) } catch(e2) {}
-        try { parts.push("elementsLen=" + String(s.elements ? s.elements.length : "?")) } catch(e3) {}
-        try { parts.push("element=" + __dbgElement(s.element)) } catch(e4) {}
-        return parts.join(" ")
+    function __selectionSingleVoiceIndexOrNull() {
+        if (!curScore || !curScore.selection) return -1
+        var els = null
+        try { els = curScore.selection.elements } catch (e0) { els = null }
+        if (!els || !els.length) return -1
+
+        var found = null
+        function considerTrack(tr) {
+            var t = Number(tr)
+            if (isNaN(t)) return true
+            var v = t % 4
+            if (found === null) { found = v; return true }
+            return (v === found)
+        }
+
+        for (var i = 0; i < els.length; ++i) {
+            var el = els[i]
+            // If element itself has a track (common for notes)
+            try {
+                if (el && el.track !== undefined && el.track !== null) {
+                    if (!considerTrack(el.track)) return null // multiple voices
+                }
+            } catch (e1) {}
+
+            // If it's a chord-like element, check its notes too
+            try {
+                if (el && el.notes && el.notes.length) {
+                    for (var n = 0; n < el.notes.length; ++n) {
+                        var nt = el.notes[n]
+                        if (nt && nt.track !== undefined && nt.track !== null) {
+                            if (!considerTrack(nt.track)) return null // multiple voices
+                        }
+                    }
+                }
+            } catch (e2) {}
+        }
+
+        // NEW: if we never encountered any track-bearing items, it's "no notes selected"
+        if (found === null) return -1
+
+        return found
+    }
+
+    function __selectionSingleStaffIndexOrNull() {
+        if (!curScore || !curScore.selection)
+            return -1
+
+        var els = null
+        try { els = curScore.selection.elements } catch (e0) { els = null }
+        if (!els || !els.length)
+            return -1
+
+        var found = null
+
+        function considerTrack(tr) {
+            var t = Number(tr)
+            if (isNaN(t))
+                return true
+            var s = Math.floor(t / 4)
+            if (found === null) {
+                found = s
+                return true
+            }
+            return (s === found)
+        }
+
+        for (var i = 0; i < els.length; ++i) {
+            var el = els[i]
+
+            try {
+                if (el && el.track !== undefined && el.track !== null) {
+                    if (!considerTrack(el.track))
+                        return null
+                }
+            } catch (e1) {}
+
+            try {
+                if (el && el.notes && el.notes.length) {
+                    for (var n = 0; n < el.notes.length; ++n) {
+                        var nt = el.notes[n]
+                        if (nt && nt.track !== undefined && nt.track !== null) {
+                            if (!considerTrack(nt.track))
+                                return null
+                        }
+                    }
+                }
+            } catch (e2) {}
+        }
+
+        if (found === null)
+            return -1
+
+        return found
     }
 
     function __getSourceSelectionSegments() {
@@ -1020,161 +1218,79 @@ MuseScore {
         return !!c.segment
     }
 
-    function __findNoteAtTickInVoice(staffIdx, tick, voiceIdx, pitch) {
-        if (!curScore) return null;
-
-        var v = Number(voiceIdx ?? 0);
-        if (v < 0) v = 0;
-        if (v > 3) v = 3;
-
-        var t = Number(tick ?? 0);
-        if (isNaN(t) || t < 0) t = 0;
-
-        var p = Number(pitch);
-        if (isNaN(p)) return null;
-
-        var c = curScore.newCursor();
-        if (!c) return null;
-
-        // Seek on voice 0 track first (reliable segment)
-        c.track = staffBaseTrack(staffIdx);
-        if (!__seekCursorToTick(c, t)) return null;
-
-        // Switch to requested voice without moving the segment
-        try { c.voice = v } catch (eV) {
-            try { c.track = staffBaseTrack(staffIdx) + v } catch (eT) {}
-        }
-
-        var el = c.element;
-        if (!el || !el.notes || !el.notes.length) return null;
-
-        // Find exact pitch match in that chord
-        for (var i = 0; i < el.notes.length; ++i) {
-            var n = el.notes[i];
-            try {
-                if (n && n.pitch !== undefined && Number(n.pitch) === p) return n;
-            } catch (eP) {}
-        }
-
-        return null;
-    }
-
-
-
-    function __selectPasteAnchorForStaff(staffIdx, startTick, endTick) {
-        if (!curScore) return false
+    function __selectAnchorForStaffAtTick(staffIdx, tick) {
+        if (!curScore)
+            return false
 
         var c = curScore.newCursor()
-        if (!c) return false
+        if (!c)
+            return false
 
         c.track = staffBaseTrack(staffIdx)
 
-        var st = Number(startTick || 0)
-        var et = (endTick === undefined || endTick === null) ? st : Number(endTick)
-
-        if (et < st) {
-            var tmp = st
-            st = et
-            et = tmp
-        }
-
-        if (!__seekCursorToTick(c, st)) return false
-
-        var guard = 0
-        while (c.segment && c.segment.tick !== undefined && c.segment.tick < et && guard < 200000) {
-            var el = c.element
-            if (el) {
-                try {
-                    el.selected = true
-                    return true
-                } catch (e) {
-                }
-            }
-            c.next()
-            guard++
-        }
-
-        return false
-    }
-
-    // Select the same segment-range but on a single destination staff
-    function __selectRangeForStaff(startSeg, endSeg, staffIdx) {
-        if (!curScore || !curScore.selection || typeof curScore.selection.selectRange !== "function")
+        if (!__seekCursorToTick(c, Number(tick || 0)))
             return false
-        if (!startSeg || !endSeg)
+
+        var el = c.element
+        if (!el)
             return false
 
         try {
-            // endStaff is exclusive: staffIdx..staffIdx+1 selects one staff
-            curScore.selection.selectRange(startSeg, endSeg, staffIdx, staffIdx + 1)
+            if (el.type === Element.CHORD && el.notes && el.notes.length)
+                curScore.selection.select(el.notes[0])
+            else
+                curScore.selection.select(el)
             return true
         } catch (e) {
-            Log.error(tag, "selectRangeForStaff failed: " + String(e))
             return false
         }
     }
 
-    function __collectChordsInTickRangeForStaff(staffIdx, startTick, endTick) {
-        var out = []
-        if (!curScore) return out
-
-        var st = Number(startTick || 0)
-        var et = Number(endTick || st)
-
-        if (et < st) {
-            var tmp = st
-            st = et
-            et = tmp
-        }
+    function __selectChordNoteAtTick(staffIdx, voiceIdx, tick) {
+        if (!curScore || tick === undefined || tick === null)
+            return false
 
         var c = curScore.newCursor()
-        if (!c) return out
+        if (!c)
+            return false
 
-        c.track = staffBaseTrack(staffIdx)
+        c.track = staffBaseTrack(staffIdx) + voiceIdx
+        if (!__seekCursorToTick(c, tick))
+            return false
 
-        if (!__seekCursorToTick(c, st)) return out
+        var el = c.element
+        if (!el || !el.notes || !el.notes.length)
+            return false
 
-        var guard = 0
-        while (c.segment && c.segment.tick !== undefined && c.segment.tick < et && guard < 200000) {
-            var el = c.element
-            if (el && el.notes && el.notes.length) {
-                out.push(el)
-            }
-            c.next()
-            guard++
+        try {
+            curScore.selection.select(el.notes[0])
+            return true
+        } catch (e) {
+            return false
         }
-        return out
     }
 
-    function __collectChordsInTickRangeForTrack(track, startTick, endTick) {
-        var out = [];
-        if (!curScore) return out;
-
-        var st = Number(startTick ?? 0);
-        var et = Number(endTick ?? st);
-        if (et < st) { var tmp = st; st = et; et = tmp; }
-
-        var c = curScore.newCursor();
-        if (!c) return out;
-
-        c.track = Number(track ?? 0);
-
-        if (!__seekCursorToTick(c, st)) return out;
-
-        var guard = 0;
-        while (c.segment && c.segment.tick !== undefined && c.segment.tick < et && guard < 200000) {
-            var el = c.element;
-            if (el && el.notes && el.notes.length) {
-                // IMPORTANT: capture the tick from the cursor (reliable),
-                // because chord.segment.tick is logging as "?" in runtime.
-                out.push({ chord: el, tick: c.tick });
+    function __dbgPitchNote(label) {
+        try {
+            var els = curScore.selection.elements;
+            if (!els || !els.length) {
+                __logDebug(label + " <no selection>");
+                return;
             }
-            c.next();
-            guard++;
+            var n = els[0];
+            __logDebug(
+                        label +
+                        " pitch=" + n.pitch +
+                        " tick=" + (n.tick !== undefined ? n.tick : "?") +
+                        " tieBack=" + !!n.tieBack +
+                        " tieForward=" + !!n.tieForward
+                        );
+        } catch (e) {
+            __logDebug(label + " <exception>");
         }
-
-        return out;
     }
+
+    // --- Overwrite modal helpers ------------------------------------------------
 
     function __trackHasNotesInTickRange(track, startTick, endTick) {
         // Treat "has notes" as: any CHORD element with at least 1 note.
@@ -1206,115 +1322,63 @@ MuseScore {
         return out;
     }
 
-    function __getTieBack(note) {
-        try { if (note && note.tieBack) return note.tieBack; } catch (e) {}
-        try { if (note && note.tieBackward) return note.tieBackward; } catch (e2) {}
-        return null;
-    }
+    // --- Source analysis & planning (read-only - should never issue cmd()) ------
 
-    function __getTieForward(note) {
-        try { if (note && note.tieForward) return note.tieForward; } catch (e) {}
-        try { if (note && note.tieFor) return note.tieFor; } catch (e2) {}
-        return null;
-    }
+    function __collectChordsInTickRangeForTrack(track, startTick, endTick) {
+        var out = [];
+        if (!curScore) return out;
 
-    function __getTieStartNoteFromTieBack(tieBack) {
-        if (!tieBack) return null;
-        try { if (tieBack.startNote) return tieBack.startNote; } catch (e) {}
-        try { if (tieBack.start) return tieBack.start; } catch (e2) {}
-        try { if (tieBack.noteStart) return tieBack.noteStart; } catch (e3) {}
-        return null;
-    }
+        var st = Number(startTick ?? 0);
+        var et = Number(endTick ?? st);
+        if (et < st) { var tmp = st; st = et; et = tmp; }
 
-    function __getTieEndNoteFromTieForward(tieForward) {
-        if (!tieForward) return null;
-        try { if (tieForward.endNote) return tieForward.endNote; } catch (e) {}
-        try { if (tieForward.end) return tieForward.end; } catch (e2) {}
-        try { if (tieForward.noteEnd) return tieForward.noteEnd; } catch (e3) {}
-        return null;
-    }
+        var c = curScore.newCursor();
+        if (!c) return out;
 
-    function __findTieStartRowObj(tieState, startNote) {
-        if (!tieState || !tieState.starts || !tieState.starts.length) return null;
-        for (var i = 0; i < tieState.starts.length; ++i) {
-            if (tieState.starts[i] === startNote) return tieState.rows[i];
-        }
-        return null;
-    }
+        c.track = Number(track ?? 0);
 
-    function __findTieRowByTieObject(tieState, tieObj) {
-        if (!tieState || !tieState.ties || !tieState.ties.length) return -1;
-        for (var i = 0; i < tieState.ties.length; ++i) {
-            if (tieState.ties[i] === tieObj) return i;
-        }
-        return -1;
-    }
+        if (!__seekCursorToTick(c, st)) return out;
 
-    function __preparePasteCursorAtTick(track, startSegTick) {
-        if (!curScore) return null
-        var cursor = curScore.newCursor()
-        if (!cursor) return null
-
-        cursor.track = Number(track ?? 0)
-
-        // Use seek (rewind + walk segments) so the cursor location is defined.
-        if (!__seekCursorToTick(cursor, startSegTick)) {
-            try {
-                Log.error(tag, "seekCursorToTick failed track=" + String(cursor.track) +
-                          " targetTick=" + String(startSegTick) +
-                          " segment=" + String(!!cursor.segment))
-            } catch (eLog) {}
-            return null
-        }
-
-        // If we're at the target tick but there's no element in this voice track,
-        // create a rest so there's something selectable to paste onto.
-        if (cursor.tick === startSegTick && !cursor.element) {
-            cursor.setDuration(1, 4)
-            cursor.addRest()
-            if (!cursor.element) {
-                // Best-effort: some builds only expose element after moving
-                try { cursor.prev() } catch (e0) {}
+        var guard = 0;
+        while (c.segment && c.segment.tick !== undefined && c.segment.tick < et && guard < 200000) {
+            var el = c.element;
+            if (el && el.notes && el.notes.length) {
+                // IMPORTANT: capture the tick from the cursor (reliable),
+                // because chord.segment.tick is logging as "?" in runtime.
+                out.push({ chord: el, tick: c.tick });
             }
-            return cursor
+            c.next();
+            guard++;
         }
 
-        // If we overshot the tick, step back and insert a rest anchor.
-        if (cursor.tick > startSegTick) {
-            cursor.prev()
-            cursor.setDuration(1, 4)
-            cursor.addRest()
-            if (!cursor.element) {
-                try { cursor.prev() } catch (e1) {}
-            }
-            return cursor
-        }
-
-        // Already have something at this tick
-        if (cursor.element) return cursor
-
-        // Safety fallback
-        cursor.setDuration(1, 4)
-        cursor.addRest()
-        if (!cursor.element) {
-            try { cursor.prev() } catch (e2) {}
-        }
-        return cursor
+        return out;
     }
 
-    function __selectCursorElementForPaste(cursor) {
-        if (!curScore || !cursor || !cursor.element) return false
+    function __sortedNotesHighToLow(notes) {
+        var out = []
+        for (var i = 0; i < notes.length; ++i)
+            out.push(notes[i])
 
-        if (cursor.element.type === Element.CHORD) {
-            if (cursor.element.notes && cursor.element.notes.length) {
-                curScore.selection.select(cursor.element.notes[0])
-                return true
-            }
-            return false
-        } else {
-            curScore.selection.select(cursor.element)
-            return true
-        }
+        out.sort(function(a, b) {
+            var pa = (a && a.pitch !== undefined) ? Number(a.pitch) : 0
+            var pb = (b && b.pitch !== undefined) ? Number(b.pitch) : 0
+            return pb - pa
+        })
+
+        return out
+    }
+
+    function __orderedValidRowsForNoteCount(noteCount) {
+        var n = Number(noteCount || 0)
+        if (n <= 0) return []
+        if (n === 1) return [0]
+
+        var out = [0]
+        var start = 8 - (n - 1)
+        if (start < 1) start = 1
+        for (var r = start; r <= 7; ++r)
+            out.push(r)
+        return out
     }
 
     function __mapRowToNoteIndex(rowIndex, noteCount) {
@@ -1353,548 +1417,207 @@ MuseScore {
         return out;
     }
 
-    // Returns a deep-cloned 8-row array where only rows assigned to `voice` remain active
-    function __rowsForSingleVoice(rows, voice) {
-        var v = Number(voice ?? 0);
-        if (v < 0) v = 0;
-        if (v > 3) v = 3;
+    function __buildSourceChordPlan(sourceStaffIdx, startTick, endTick, rows, warningSink) {
+        var plan = []
+        var sourceTrack = staffBaseTrack(sourceStaffIdx)
+        var sourceChords = __collectChordsInTickRangeForTrack(sourceTrack, startTick, endTick)
+        for (var i = 0; i < sourceChords.length; ++i) {
+            var chordObj = sourceChords[i]
+            var chord = (chordObj && chordObj.chord) ? chordObj.chord : chordObj
+            var tick = (chordObj && chordObj.tick !== undefined) ? Number(chordObj.tick) : 0
 
-        var out = [];
-        for (var i = 0; i < 8; ++i) {
-            var r = (rows && rows[i]) ? rows[i] : { active:false, offset:0, voice:0 };
-            var rv = Number(r.voice ?? 0);
-            if (rv < 0) rv = 0;
-            if (rv > 3) rv = 3;
+            if (!chord || !chord.notes || !chord.notes.length)
+                continue
 
-            out.push({
-                         active: !!r.active && (rv === v),
-                         offset: Number(r.offset ?? 0),
-                         voice: rv
-                     });
+            var noteCount = chord.notes.length
+            var orderedRows = __orderedValidRowsForNoteCount(noteCount)
+
+            if (!orderedRows.length)
+                continue
+
+            var validSet = ({})
+            for (var vr = 0; vr < orderedRows.length; ++vr)
+                validSet[String(orderedRows[vr])] = true
+
+            var notes = __sortedNotesHighToLow(chord.notes)
+            var rowsByVoice = [({}), ({}), ({}), ({})]
+
+            for (var r = 0; r < 8; ++r) {
+                var rowObj = (rows && rows[r]) ? rows[r] : null
+                if (!rowObj || !rowObj.active)
+                    continue
+
+                var voiceIdx = Number(rowObj.voice ?? 0)
+                if (voiceIdx < 0) voiceIdx = 0
+                if (voiceIdx > 3) voiceIdx = 3
+
+                if (!validSet[String(r)]) {
+                    __recordIgnoredRows(warningSink, sourceStaffIdx, tick, noteCount, [r])
+                    continue
+                }
+
+                var noteIndex = __mapRowToNoteIndex(r, noteCount)
+                var srcNote = notes[noteIndex]
+
+                rowsByVoice[voiceIdx][String(r)] = {
+                    rowIndex: r,
+                    offset: Number(rowObj.offset ?? 0),
+                    skipPitch: false
+                }
+            }
+
+            plan.push({
+                          tick: tick,
+                          noteCount: noteCount,
+                          rowsByVoice: rowsByVoice
+                      })
         }
-        return out;
+
+        return plan
+
     }
 
-    function __applyRowsToChord(chordObj, rows, tieState, opts) {
-        // Accept either a raw chord OR { chord, tick }
-        var chord = (chordObj && chordObj.chord) ? chordObj.chord : chordObj;
-        var chordTickNum = (chordObj && chordObj.tick !== undefined) ? Number(chordObj.tick) : null;
+    function __passPlanForVoice(sourcePlan, voiceIdx) {
+        var out = []
 
-        if (!chord || !chord.notes || !chord.notes.length || !rows || !rows.length)
-            return;
+        for (var i = 0; i < sourcePlan.length; ++i) {
+            var entry = sourcePlan[i]
+            var rowsForVoice = entry.rowsByVoice[voiceIdx] || ({})
+            var hasRows = false
 
-        // Debug string: if we have a numeric tick, show it.
-        var chordTick = (chordTickNum !== null && !isNaN(chordTickNum)) ? String(chordTickNum) : "?";
-
-        // NEW: optionally restrict to a single voice before mapping/pruning
-        var filterVoice = (opts && opts.filterVoice !== undefined && opts.filterVoice !== null)
-                ? Number(opts.filterVoice)
-                : null
-
-        var notes0 = chord.notes ? chord.notes.slice(0) : []
-        if (filterVoice !== null) {
-            var filtered = []
-            for (var ii = 0; ii < notes0.length; ++ii) {
-                var nv = __noteVoiceIndex(notes0[ii])
-                if (nv === filterVoice) filtered.push(notes0[ii])
-            }
-            notes0 = filtered
-        }
-
-        // Nothing to do if this chord has no notes in the requested voice
-        if (!notes0.length) return
-
-        // Sort notes high→low (row 0 conceptually maps to "top" before mapping)
-        var notes = notes0.sort(function(a, b) {
-            var pa = (a && a.pitch !== undefined) ? a.pitch : 0
-            var pb = (b && b.pitch !== undefined) ? b.pitch : 0
-            if (pb !== pa) return pb - pa
-            var aTie = !!__getTieBack(a)
-            var bTie = !!__getTieBack(b)
-            if (aTie !== bTie) return (aTie ? 1 : -1)
-            return 0
-        })
-
-        var noteCount = notes.length
-
-        // --- Single-note semantic ---
-        // Default behavior: treat single notes as TOP notes.
-        // Per-voice behavior: allow single notes if ANY active row exists for that voice pass.
-        if (noteCount === 1) {
-            var allowAny = !!(opts && opts.singleNoteAllowAnyActive);
-
-            var anyActive = false;
-            for (var rA = 0; rA < 8; ++rA) {
-                if (rows && rows[rA] && rows[rA].active) { anyActive = true; break; }
-            }
-
-            if (allowAny) {
-                // In per-voice mode, a single-note chord is valid if this voice pass has any active row.
-                if (!anyActive) return;
-                // Continue with normal pipeline (it will keep the single note via mapping).
-            } else {
-                // Original behavior: only keep if Top row is active
-                var topActive = !!(rows && rows[0] && rows[0].active);
-                if (!topActive) {
-                    Log.debug(tag, "singleNoteAsTop -> REST chordTick=" + chordTick +
-                              " pitch=" + (notes[0] && notes[0].pitch !== undefined ? notes[0].pitch : "?"));
-                    try {
-                        curScore.selection.select(notes[0]);
-                        __doDelete();
-                    } catch (eSN) {
-                        Log.error(tag, "singleNoteAsTop delete failed: " + String(eSN));
-                    }
-                    return;
+            for (var k in rowsForVoice) {
+                if (rowsForVoice.hasOwnProperty(k)) {
+                    hasRows = true
+                    break
                 }
+            }
+
+            if (hasRows) {
+                out.push({
+                             tick: entry.tick,
+                             noteCount: entry.noteCount,
+                             rowsForVoice: rowsForVoice
+                         })
             }
         }
 
-        // Map: noteIndex -> rowObj (settings) for notes we keep
-        var keepMap = {}
-        var keepIndices = {} // set of indices we keep
+        return out
+    }
 
-        for (var r = 0; r < 8; ++r) {
-            var ro = rows[r]
-            if (!ro || !ro.active) continue
 
-            var ni = __mapRowToNoteIndex(r, noteCount)
-            keepIndices[ni] = true
 
-            // If multiple active rows map to the same noteIndex, keep the first one (stable)
-            if (!keepMap.hasOwnProperty(ni)) keepMap[ni] = { rowObj: ro, rowIndex: r }
-        }
+    function __runVoicePassFromSourcePlan(staffIdx, startTick, endTick, passPlan, voiceIdx) {
+        if (!passPlan || !passPlan.length)
+            return true
 
-        var keepIdxKeys = Object.keys(keepIndices)
-        if (keepIdxKeys.length === 0) {
-            Log.warn(tag, "applyRows chordTick=" + chordTick + " keepCount=0 (no active rows mapped) - skipping chord")
-            return
-        }
+        // 1) Anchor at start tick on base voice (voice 1 / track 0)
+        if (!__selectAnchorForStaffAtTick(staffIdx, startTick))
+            return false
 
-        // Build explicit keep/delete NOTE OBJECT lists (stable references)
-        var keepNotes = []
-        var deleteNotes = []
-        for (var i = 0; i < noteCount; ++i) {
-            if (keepIndices[i]) keepNotes.push({
-                                                   note: notes[i],
-                                                   rowObj: keepMap[i] ? keepMap[i].rowObj : null,
-                                                   rowIndex: keepMap[i] ? keepMap[i].rowIndex : -1
-                                               })
-            else deleteNotes.push(notes[i])
-        }
+        // 2) Paste once (paste range becomes selected)
+        __doPaste()
 
-        Log.debug(tag, "prunePlan chordTick=" + chordTick +
-                  " keepCount=" + keepNotes.length +
-                  " deleteCount=" + deleteNotes.length)
+        // 3) Change voice while paste range is still selected
+        if (voiceIdx !== 0)
+            __setVoice(voiceIdx)
 
-        try {
-            var kp = [], dp = [];
-            for (var kk = 0; kk < keepNotes.length; ++kk) kp.push(keepNotes[kk].note.pitch);
-            for (var dd = 0; dd < deleteNotes.length; ++dd) dp.push(deleteNotes[dd].pitch);
-            Log.debug(tag, "keepDelete chordTick=" + chordTick + " keep=" + JSON.stringify(kp) + " del=" + JSON.stringify(dp));
-        } catch (eKD) {}
+        // 4) Walk left to collapse range selection to first chord/note
+        var stepsLeft = passPlan.length - 1
+        for (var k = 0; k < stepsLeft; ++k)
+            __doMoveLeft()
 
-        // --- Tie continuation override (match by tie object; replace the mapped row note) ---
-        for (var iT = 0; iT < deleteNotes.length; ++iT) {
-            var dn0 = deleteNotes[iT];
-            var tb = __getTieBack(dn0);
-            if (!tb) continue;
+        // 5) Process each chord independently
+        for (var i = 0; i < passPlan.length; ++i) {
+            var entry = passPlan[i]
+            if (!entry || entry.tick === undefined)
+                continue
 
-            var j = __findTieRowByTieObject(tieState, tb);
-            if (j < 0) continue; // tie not tracked as kept on prior chord
+            __selectChordNoteAtTick(staffIdx, voiceIdx, entry.tick)
 
-            var desiredRowIdx = tieState.rowIdx[j];
-            var rowObjFromTie = tieState.rows[j];
+            var rowsForVoice = entry.rowsForVoice || ({})
+            var orderedRows = __orderedValidRowsForNoteCount(entry.noteCount)
 
-            // Remove dn0 from delete list
-            deleteNotes.splice(iT, 1);
-            --iT;
+            // Normalize to top note of chord
+            __doTopChord()
 
-            // If we already kept a note for that row, evict it to delete (unless it's the same note)
-            for (var kk = 0; kk < keepNotes.length; ++kk) {
-                if (keepNotes[kk].rowIndex === desiredRowIdx && keepNotes[kk].note !== dn0) {
-                    deleteNotes.push(keepNotes[kk].note);
-                    keepNotes.splice(kk, 1);
-                    break;
-                }
-            }
+            var keptCount = 0
+            for (var r = 0; r < orderedRows.length; ++r) {
+                var rowIndex = orderedRows[r]
+                var spec = rowsForVoice[String(rowIndex)]
 
-            // Insert dn0 as the kept note for that row
-            keepNotes.push({ note: dn0, rowObj: rowObjFromTie, rowIndex: desiredRowIdx });
+                // Step down inside the chord only when needed
+                if (keptCount > 0)
+                    __doDownChord()
 
-            Log.debug(tag, "tieOverride REPLACE chordTick=" + chordTick +
-                      " pitch=" + (dn0.pitch !== undefined ? dn0.pitch : "?") +
-                      " rowIdx=" + desiredRowIdx);
-        }
+                if (!spec) {
 
-        // --- Tie continuation fallback #2: match by continuation pitch (robust when endNote identity differs) ---
-        if (tieState && tieState.contPitches && tieState.contPitches.length) {
-            for (var iT3 = 0; iT3 < deleteNotes.length; ++iT3) {
-                var dn2 = deleteNotes[iT3];
-                var dnPitch = (dn2 && dn2.pitch !== undefined) ? dn2.pitch : null;
-                if (dnPitch === null) continue;
+                    // Row not used for this voice — BUT never delete tied notes
+                    var els = curScore.selection.elements
+                    var note = (els && els.length) ? els[0] : null
 
-                // Find a tracked tie continuation pitch match
-                var j3 = -1;
-                for (var q3 = 0; q3 < tieState.contPitches.length; ++q3) {
-                    if (tieState.contPitches[q3] !== null && tieState.contPitches[q3] === dnPitch) { j3 = q3; break; }
-                }
-                if (j3 < 0) continue;
-
-                var desiredRowIdx3 = tieState.rowIdx[j3];
-                var rowObjFromTie3 = tieState.rows[j3];
-
-                // Remove dn2 from delete list
-                deleteNotes.splice(iT3, 1);
-                --iT3;
-
-                // Evict any currently-kept note assigned to that row
-                for (var kk3 = 0; kk3 < keepNotes.length; ++kk3) {
-                    if (keepNotes[kk3].rowIndex === desiredRowIdx3 && keepNotes[kk3].note !== dn2) {
-                        deleteNotes.push(keepNotes[kk3].note);
-                        keepNotes.splice(kk3, 1);
-                        break;
-                    }
-                }
-
-                // Insert dn2 as the kept note for that row
-                keepNotes.push({ note: dn2, rowObj: rowObjFromTie3, rowIndex: desiredRowIdx3 });
-
-                // Mark this tie entry as consumed so it doesn't keep matching later chords
-                tieState.contPitches[j3] = null;
-                tieState.ends[j3] = null;
-                tieState.ties[j3] = null;
-
-                Log.debug(tag, "tieOverride CONTPITCH chordTick=" + chordTick +
-                          " pitch=" + dnPitch +
-                          " rowIdx=" + desiredRowIdx3);
-            }
-        }
-
-        // --- Tie continuation row-lock for KEPT notes ---
-        // If a tie continuation note is already in keepNotes, it may have become the highest pitch
-        // (because transposing the tie start propagates through the chain). That can cause the mapping
-        // to incorrectly assign the continuation note to the Top row. We force it back onto the row
-        // it originally belonged to (tracked in tieState.rowIdx via contPitches).
-        (function () {
-            try {
-                if (!(tieState && tieState.contPitches && tieState.contPitches.length)) return;
-
-                for (var kT = 0; kT < keepNotes.length; ++kT) {
-                    var nT = keepNotes[kT].note;
-                    if (!__getTieBack(nT)) continue; // only continuations
-
-                    var pT = (nT && nT.pitch !== undefined) ? nT.pitch : null;
-                    if (pT === null) continue;
-
-                    // Find which tracked tie this continuation pitch belongs to
-                    var jT = -1;
-                    for (var qT = 0; qT < tieState.contPitches.length; ++qT) {
-                        if (tieState.contPitches[qT] !== null && tieState.contPitches[qT] === pT) { jT = qT; break; }
-                    }
-                    if (jT < 0) continue;
-
-                    var desiredRow = tieState.rowIdx[jT];
-                    var desiredRowObj = tieState.rows[jT];
-
-                    // If another kept note is currently assigned to that desired row, evict it to delete
-                    for (var kkT = 0; kkT < keepNotes.length; ++kkT) {
-                        if (kkT === kT) continue;
-                        if (keepNotes[kkT].rowIndex === desiredRow && keepNotes[kkT].note !== nT) {
-                            deleteNotes.push(keepNotes[kkT].note);
-                            keepNotes.splice(kkT, 1);
-                            if (kkT < kT) --kT; // keep index stable
-                            break;
-                        }
+                    if (note && (note.tieBack || note.tieForward)) {
+                        // Preserve tie chain integrity
+                        keptCount += 1
+                        continue
                     }
 
-                    // Force the continuation note onto its original row
-                    keepNotes[kT].rowIndex = desiredRow;
-                    keepNotes[kT].rowObj = desiredRowObj;
-
-                    Log.debug(tag, "tieLock KEEP chordTick=" + chordTick +
-                              " pitch=" + pT +
-                              " rowIdx=" + desiredRow);
-                }
-            } catch (eTL) {}
-        })();
-
-        // --- Rebalance non-tied rows when a tie-continuation note is being kept ---
-        // This prevents a non-tied row (e.g. "Second note") from sliding to the wrong pitch
-        // when the tie continuation changes pitch-order in the chord (your E instead of A case).
-        (function () {
-            try {
-                // 1) Identify kept notes that are tie continuations (tieBack present)
-                var locked = [];
-                for (var iL = 0; iL < keepNotes.length; ++iL) {
-                    var nL = keepNotes[iL].note;
-                    if (__getTieBack(nL)) {
-                        locked.push(keepNotes[iL]); // keep existing rowIndex/rowObj for the tie row
-                    }
-                }
-                if (!locked.length) return; // nothing to rebalance
-
-                // Helpers
-                function isLockedNote(n) {
-                    for (var z = 0; z < locked.length; ++z) {
-                        if (locked[z].note === n) return true;
-                    }
-                    return false;
-                }
-                function isKeptIn(list, n) {
-                    for (var z2 = 0; z2 < list.length; ++z2) {
-                        if (list[z2].note === n) return true;
-                    }
-                    return false;
-                }
-                function rowIsLocked(rowIndex) {
-                    for (var z3 = 0; z3 < locked.length; ++z3) {
-                        if (locked[z3].rowIndex === rowIndex) return true;
-                    }
-                    return false;
-                }
-
-                // 2) Remaining notes exclude locked continuation notes
-                var remaining = [];
-                for (var rr = 0; rr < notes.length; ++rr) {
-                    if (!isLockedNote(notes[rr])) remaining.push(notes[rr]);
-                }
-                if (!remaining.length) return;
-
-                // 3) Start new keep list with the locked continuation rows
-                var newKeep = [];
-                for (var lk = 0; lk < locked.length; ++lk) newKeep.push(locked[lk]);
-
-                // 4) For each active row that isn't locked, choose from remaining using the same row mapping
-                for (var rowI = 0; rowI < 8; ++rowI) {
-                    if (!rows[rowI] || !rows[rowI].active) continue;
-                    if (rowIsLocked(rowI)) continue;
-
-                    var ni2 = __mapRowToNoteIndex(rowI, remaining.length);
-                    var target = remaining[ni2];
-                    if (!target) continue;
-
-                    // Avoid duplicates
-                    if (isKeptIn(newKeep, target)) continue;
-
-                    newKeep.push({ note: target, rowObj: rows[rowI], rowIndex: rowI });
-                }
-
-                // 5) Replace keepNotes and rebuild deleteNotes accordingly
-                keepNotes = newKeep;
-
-                var newDelete = [];
-                for (var dd2 = 0; dd2 < notes.length; ++dd2) {
-                    var cand = notes[dd2];
-                    if (!isKeptIn(keepNotes, cand)) newDelete.push(cand);
-                }
-                deleteNotes = newDelete;
-
-                // Debug (optional): final keep/delete after rebalance
-                try {
-                    var kp2 = [], dp2 = [];
-                    for (var a = 0; a < keepNotes.length; ++a) kp2.push(keepNotes[a].note.pitch);
-                    for (var b = 0; b < deleteNotes.length; ++b) dp2.push(deleteNotes[b].pitch);
-                    Log.debug(tag, "rebalance chordTick=" + chordTick +
-                              " keep=" + JSON.stringify(kp2) +
-                              " del=" + JSON.stringify(dp2));
-                } catch (eDbg) {}
-            } catch (eReb) {}
-        })();
-
-        // 1) Apply pitch + voice to kept notes FIRST (prevents index drift)
-        for (var k = 0; k < keepNotes.length; ++k) {
-            var kn = keepNotes[k].note
-            var rowObjK = keepNotes[k].rowObj || { voice: 0, offset: 0 }
-
-            try { curScore.selection.select(kn) } catch (eSel) { continue }
-
-            // Determine targetVoice early so tie-continuation skips only apply to voice 0 processing
-            var targetVoiceEarly = (rowObjK && rowObjK.voice !== undefined) ? Number(rowObjK.voice) : 0;
-            if (targetVoiceEarly < 0) targetVoiceEarly = 0;
-            if (targetVoiceEarly > 3) targetVoiceEarly = 3;
-
-            var tbK = __getTieBack(kn);
-
-            // Only skip tie continuations when we are actually editing voice 0 notes.
-            // For non-zero voices we are INSERTING new notes, so we must not skip.
-            if (tbK && targetVoiceEarly === 0) {
-                Log.debug(tag, "tieSkip APPLY chordTick=" + chordTick +
-                          " pitch=" + (kn.pitch !== undefined ? kn.pitch : "?"));
-
-                // Keep your existing consumption behavior for voice 0
-                try {
-                    if (tieState) {
-                        var consumed = false;
-                        var jC = __findTieRowByTieObject(tieState, tbK);
-                        if (jC >= 0) {
-                            tieState.contPitches[jC] = null;
-                            tieState.ends[jC] = null;
-                            tieState.ties[jC] = null;
-                            consumed = true;
-                            Log.debug(tag, "tieConsume BYOBJ chordTick=" + chordTick +
-                                      " pitch=" + (kn.pitch !== undefined ? kn.pitch : "?") +
-                                      " idx=" + jC);
-                        }
-                        if (!consumed && tieState.contPitches && tieState.contPitches.length && kn && kn.pitch !== undefined) {
-                            for (var qC = 0; qC < tieState.contPitches.length; ++qC) {
-                                if (tieState.contPitches[qC] !== null && tieState.contPitches[qC] === kn.pitch) {
-                                    tieState.contPitches[qC] = null;
-                                    tieState.ends[qC] = null;
-                                    tieState.ties[qC] = null;
-                                    Log.debug(tag, "tieConsume BYPITCH chordTick=" + chordTick +
-                                              " pitch=" + kn.pitch +
-                                              " idx=" + qC);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                } catch (eTC) {}
-
-                continue;
-            }
-
-            // For non-zero voices, do NOT continue here; allow the insert path to run.
-
-            Log.debug(tag, "applyNote chordTick=" + chordTick +
-                      " pitch=" + (kn.pitch !== undefined ? kn.pitch : "?") +
-                      " voice=" + (rowObjK.voice !== undefined ? rowObjK.voice : "?") +
-                      " offset=" + (rowObjK.offset !== undefined ? rowObjK.offset : "?"))
-
-            var skipVoiceCmd = !!(opts && opts.skipVoiceCmd)
-
-            var targetVoice = (rowObjK.voice !== undefined) ? Number(rowObjK.voice) : 0
-            var deltaK = Number(rowObjK.offset ?? 0)
-
-            if (targetVoice !== 0) {
-                var staffIdx2 = (opts && typeof opts.staffIdx === "number") ? opts.staffIdx : -1;
-                var tick2 = (chordTickNum !== null && !isNaN(chordTickNum)) ? chordTickNum : 0;
-
-                if (staffIdx2 < 0) {
-                    Log.warn(tag, "voice>0 insert: missing staffIdx; skipping");
-                    continue;
-                }
-
-                var dur = null;
-                try { dur = chord.duration } catch (eD) { dur = null }
-
-                var newPitch = (kn && kn.pitch !== undefined) ? (Number(kn.pitch) + deltaK) : null;
-                if (newPitch === null || isNaN(newPitch)) {
-                    continue;
-                }
-
-                // 1) Insert the destination note
-                __addNoteAtTickInVoice(staffIdx2, tick2, targetVoice, newPitch, dur);
-
-                // 2) Resolve the inserted Note object (needed to attach a tie)
-                var destNote = __findNoteAtTickInVoice(staffIdx2, tick2, targetVoice, newPitch);
-
-                // 3) Tie replication (best effort)
-                // If the SOURCE note has tieBack, we should tie from the previously inserted start note.
-                var hasTieBack = !!__getTieBack(kn);
-                var hasTieForward = !!__getTieForward(kn);
-
-                if (tieState && tieState.pendingTieByPitch) {
-                    var key = String(newPitch);
-
-                    // Finalize pending tie if this is a continuation
-                    if (hasTieBack && tieState.pendingTieByPitch[key]) {
-                        try {
-                            var startDest = tieState.pendingTieByPitch[key];
-                            // Create tie by selecting the start note and invoking tie command
-                            curScore.selection.select(startDest);
-                            __doAddTieBestEffort();
-                        } catch (eTie) {}
-
-                        // Consume the pending tie start
-                        try { delete tieState.pendingTieByPitch[key]; } catch (eDel) {}
-                    }
-
-                    // Start a new pending tie if this note begins a tie forward
-                    // (works for both initial tie starts and mid-chain tie forward notes)
-                    if (hasTieForward && destNote) {
-                        tieState.pendingTieByPitch[key] = destNote;
-                    }
-                }
-
-                // Do not transpose existing source note; voice 0 pass will prune it.
-                continue;
-            }
-
-            // Otherwise (voice 0), keep your existing transpose-by-actions behavior:
-            if (deltaK !== 0) {
-                var stepsK = deltaK
-                while (stepsK >= 12) { __pitchUpOctave(); stepsK -= 12 }
-                while (stepsK <= -12) { __pitchDownOctave(); stepsK += 12 }
-                while (stepsK > 0) { __pitchUp(); stepsK -= 1 }
-                while (stepsK < 0) { __pitchDown(); stepsK += 1 }
-            }
-
-            // If this note starts a tie forward, remember it (so we can keep its continuation later)
-            var tfK = __getTieForward(kn);
-            if (tfK && tieState) {
-                tieState.ties.push(tfK);
-                tieState.rows.push(rowObjK);
-                tieState.rowIdx.push(keepNotes[k].rowIndex);
-
-                // store end note identity too, if we can get it
-                var endN = __getTieEndNoteFromTieForward(tfK);
-                tieState.ends.push(endN);
-
-                // NEW: store expected continuation pitch (use endN.pitch if available, else the start pitch)
-                var contPitch = (endN && endN.pitch !== undefined) ? endN.pitch
-                                                                   : (kn && kn.pitch !== undefined) ? kn.pitch
-                                                                                                    : null;
-                tieState.contPitches.push(contPitch);
-
-                Log.debug(tag, "tieTrack START chordTick=" + chordTick +
-                          " pitch=" + (kn.pitch !== undefined ? kn.pitch : "?") +
-                          " rowIdx=" + keepNotes[k].rowIndex +
-                          " endNote=" + (endN ? (endN.pitch !== undefined ? endN.pitch : "?") : "null") +
-                          " contPitch=" + (contPitch !== null ? contPitch : "null"));
-            }
-            try { if (curScore.selection && curScore.selection.clear) curScore.selection.clear() } catch (eClr) {}
-        }
-
-        var skipDelete = !!(opts && opts.skipDelete)
-
-        // 2) Now delete unwanted notes (safe one-by-one)
-        if (!skipDelete) {
-            for (var d = 0; d < deleteNotes.length; ++d) {
-                var dn = deleteNotes[d]
-                try {
-                    curScore.selection.select(dn)
                     __doDelete()
-                } catch (eDel) {
-                    Log.error(tag, "__applyRowsToChord delete failed: " + String(eDel))
+                    continue
                 }
+
+                // Pitch ONLY on tie starts
+                var els = curScore.selection.elements
+                var note = (els && els.length) ? els[0] : null
+
+                if (note && note.tieBack) {
+                    // This is a tie continuation — do NOT pitch it
+                    keptCount += 1
+                    continue
+                }
+
+                if (!spec.skipPitch)
+                    __applyPitchOffsetCommands(spec.offset)
+
+                keptCount += 1
             }
 
-            // Ensure we don't leave the last deleted/selected note highlighted
-            __clearScoreSelection();
-        } else {
-            // Still clear selection so we don't leak UI selection state
-            __clearScoreSelection();
+            // Advance to next chord/rest
+            __doMoveRight()
         }
+
+        return true
     }
 
-    // Public entry point: fire preset by index (normal-mode card click)
+    function __doUndoBestEffort() {
+        var candidates = [
+                    "action://undo",
+                    "action://notation/undo"
+                ];
+        for (var i = 0; i < candidates.length; ++i) {
+            try {
+                cmd(candidates[i]);
+                return true;
+            } catch (e) {}
+        }
+        return false;
+    }
+
     function firePreset(presetIndex, opts) {
         opts = opts || {}
 
         if (!curScore) {
-            Log.error(tag, "firePreset: no curScore")
+            __logError("firePreset: no curScore")
             return
         }
 
         if (presetIndex < 0 || presetIndex >= presets.length) {
-            Log.error(tag, "firePreset: invalid preset index " + presetIndex)
+            __logError("firePreset: invalid preset index " + presetIndex)
             return
         }
 
         var p = presets[presetIndex]
         if (!p || !p.noteRowsByStaff) {
-            Log.warn(tag, "firePreset: preset has no noteRowsByStaff")
+            __logWarn("firePreset: preset has no noteRowsByStaff")
             return
         }
 
@@ -1903,154 +1626,197 @@ MuseScore {
         var endSeg = segs.end
 
         if (!startSeg) {
-            Log.warn(tag, "firePreset: no selection (select something on the sketch staff first)")
+            __logWarn("firePreset: no score selection")
+            Interactive.info(
+                        qsTr("Nothing selected in the score."),
+                        qsTr("Tip: Use the Selection filter to customize a selection."),
+                        [qsTr("Ok")]
+                        )
+            return
+        }
 
-            let noSelectionBtn = Interactive.info(
-                    qsTr("Nothing selected in the score."),
-                    qsTr("Tip: Use the Selection filter to customize a selection."),
-                    ["Ok"]
-                    );
+        var sourceStaffIdx = __selectionSingleStaffIndexOrNull()
+        if (sourceStaffIdx === null) {
+            __logWarn("firePreset: source selection spans multiple staves.")
+            Interactive.info(
+                        qsTr("Selection must be on one staff."),
+                        qsTr("Combine the source material onto one staff and try again."),
+                        [qsTr("Ok")]
+                        )
+            return
+        }
+
+        var selVoice = __selectionSingleVoiceIndexOrNull()
+        if (selVoice === -1) {
+            __logWarn("firePreset: No notes selected (no track-bearing items in selection).")
+            Interactive.info(
+                        qsTr("No notes selected."),
+                        qsTr("Select at least one note or chord and try again."),
+                        [qsTr("Ok")]
+                        )
+            return
+        }
+
+        if (selVoice === null) {
+            __logWarn("firePreset: multiple source voices detected.")
+            Interactive.info(
+                        qsTr("Multiple voices detected."),
+                        qsTr("Move the selection to Voice 1 and try again."),
+                        [qsTr("Ok")]
+                        )
+            return
+        }
+
+        if (selVoice !== 0) {
+            __logWarn("firePreset: source selection must be Voice 1 (API voice 0). selVoice=" + selVoice)
+            Interactive.info(
+                        qsTr("Selection must be Voice 1."),
+                        qsTr("Move the selection to Voice 1 and try again."),
+                        [qsTr("Ok")]
+                        )
             return
         }
 
         var startTick = (startSeg.tick !== undefined) ? startSeg.tick : 0
         var endTick = (endSeg && endSeg.tick !== undefined) ? endSeg.tick : startTick
-
         var targetStaffIds = __staffIdsWithAnyActive(p)
 
-        var skipOverwritePrompt = !!opts.skipOverwritePrompt;
+        if (!targetStaffIds.length) {
+            __logWarn("firePreset: preset is empty (no active note rows)")
+            return
+        }
+
+        var skipOverwritePrompt = !!opts.skipOverwritePrompt
         if (!skipOverwritePrompt) {
             var overwriteStaffIds = __detectOverwriteStaffIds(targetStaffIds, startTick, endTick)
             if (overwriteStaffIds.length) {
                 var names = staffInstrumentNamesFromIndices(overwriteStaffIds)
-
-                // Stash what we were about to do so we can resume after OK
                 root.pendingOverwrite = { presetIndex: presetIndex }
 
                 let overwriteBtn = Interactive.question(
                         qsTr("Overwrite notes in destination staves?"),
                         qsTr("There are existing notes in %1.").arg(names),
                         ["Yes", "No"]
-                        );
+                        )
 
-                if (!overwriteBtn || overwriteBtn === "No") {
+                if (!overwriteBtn || overwriteBtn === "No")
                     return
-                }
             }
         }
 
-        Log.info(tag, "firePreset startTick=" + startTick + " endTick=" + endTick +
-                 " targetStaffIds=" + JSON.stringify(targetStaffIds))
-        Log.debug(tag, "firePreset initialSelection " + __dbgSelection())
+        __logInfo(
+                    "firePreset startTick=" + startTick +
+                    " endTick=" + endTick +
+                    " targetStaffIds=" + JSON.stringify(targetStaffIds)
+                    )
 
-        if (!targetStaffIds.length) {
-            Log.warn(tag, "firePreset: preset is empty (no active note rows)")
-            return
-        }
-
-        curScore.startCmd()
+        var warnings = []
+        var started = false
+        var committed = false
 
         try {
-            __doCopy()
+            curScore.startCmd()
+            started = true
 
-            var startSegTick = startSeg.tick
+            __doCopy()
 
             for (var t = 0; t < targetStaffIds.length; ++t) {
                 var staffIdx = targetStaffIds[t]
-
-                Log.info(tag, "staffPass staffIdx=" + staffIdx +
-                         " track=" + staffBaseTrack(staffIdx) +
-                         " startSegTick=" + startSegTick +
-                         " startTick=" + startTick + " endTick=" + endTick)
-
                 var rows = p.noteRowsByStaff[staffIdx]
+
                 if (!rows || !hasAnyActiveRows(rows))
+                    continue
+
+                var warningBase = warnings.length
+                var sourcePlan = __buildSourceChordPlan(sourceStaffIdx, startTick, endTick, rows, warnings)
+
+                // Re-tag newly-added warnings so they point to the destination instrument,
+                // not the source staff that was analyzed.
+                for (var w = warningBase; w < warnings.length; ++w) {
+                    warnings[w].staffIdx = staffIdx
+                }
+
+                if (!sourcePlan.length)
                     continue
 
                 var voices = __voicesUsedByRows(rows)
                 if (!voices.length)
                     continue
 
-                // NEW: run non-zero voices first, then voice 0 last
-                var orderedVoices = []
-                for (var iV = 0; iV < voices.length; ++iV) {
-                    if (voices[iV] !== 0) orderedVoices.push(voices[iV])
-                }
-                if (voices.indexOf(0) >= 0) orderedVoices.push(0)
+                // Highest voice first: 4 -> 3 -> 2 -> 1
+                voices.sort(function(a, b) { return b - a })
 
-                var anchorTrack = staffBaseTrack(staffIdx)
+                __logInfo(
+                            "staffPass staffIdx=" + staffIdx +
+                            " track=" + staffBaseTrack(staffIdx) +
+                            " startTick=" + startTick +
+                            " endTick=" + endTick +
+                            " voices=" + JSON.stringify(voices)
+                            )
 
-                // NEW: Paste ONCE per staff, on base track
-                var dc0 = __preparePasteCursorAtTick(anchorTrack, startSegTick)
-                if (!dc0) {
-                    Log.error(tag, "firePreset: could not prepare destination cursor for staff " + staffIdx + " anchorTrack " + anchorTrack)
-                    continue
-                }
-                if (!__selectCursorElementForPaste(dc0)) {
-                    Log.error(tag, "firePreset: could not select destination element for staff " + staffIdx + " anchorTrack " + anchorTrack)
-                    continue
-                }
-                __setVoice(0)
-                __doPaste()
-                __escape()
-                __setVoice(0)
+                for (var vI = 0; vI < voices.length; ++vI) {
+                    var voiceIdx = voices[vI]
+                    var passPlan = __passPlanForVoice(sourcePlan, voiceIdx)
 
-                // NEW: Collect chords ONCE after the paste
-                var chords = __collectChordsInTickRangeForTrack(anchorTrack, startTick, endTick)
-                Log.info(tag, "collectedChords staffIdx=" + staffIdx + " voice=ALL count=" + chords.length)
-
-                // Now run the voice passes without re-pasting
-                for (var vI = 0; vI < orderedVoices.length; ++vI) {
-                    var voiceIdx = orderedVoices[vI]
-                    var rowsForVoice = __rowsForSingleVoice(rows, voiceIdx)
-
-                    Log.debug(tag, "rowsForVoice staffIdx=" + staffIdx + " voice=" + voiceIdx +
-                              " anyActive=" + String(hasAnyActiveRows(rowsForVoice)))
-
-                    var tieState = {
-                        ties: [],
-                        rows: [],
-                        rowIdx: [],
-                        ends: [],
-                        contPitches: [],
-                        pendingTieByPitch: ({}) // for destination-voice inserts (voice>0)
-                    }
-
-                    for (var c = 0; c < chords.length; ++c) {
-                        __applyRowsToChord(
-                                    chords[c],
-                                    rowsForVoice,
-                                    tieState,
-                                    {
-                                        staffIdx: staffIdx,
-                                        skipVoiceCmd: false,
-                                        singleNoteAllowAnyActive: (voiceIdx !== 0),
-                                        skipDelete: (voiceIdx !== 0),
-                                        filterVoice: 0
-                                    }
+                    if (!passPlan.length) {
+                        __logInfo(
+                                    "voicePass skipped staffIdx=" + staffIdx +
+                                    " voice=" + voiceIdx +
+                                    " reason=no valid rows in source material"
                                     )
-
+                        continue
                     }
 
-                    try { if (curScore.selection && curScore.selection.clear) curScore.selection.clear() } catch (eClr2) {}
-                    __escape()
-                }
+                    __logDebug(
+                                "voicePass staffIdx=" + staffIdx +
+                                " voice=" + voiceIdx +
+                                " tickCount=" + passPlan.length
+                                )
 
-                __clearScoreSelection()
-                __escape()
+                    var okPass = __runVoicePassFromSourcePlan(
+                                staffIdx,
+                                startTick,
+                                endTick,
+                                passPlan,
+                                voiceIdx
+                                )
+
+                    if (!okPass) {
+                        throw new Error(
+                                    "Voice pass failed staffIdx=" + staffIdx +
+                                    " voice=" + voiceIdx
+                                    )
+                    }
+                }
             }
 
-        } catch (e) {
-            Log.error(tag, "firePreset exception: " + String(e))
-        }
+            curScore.endCmd()
+            committed = true
 
-        curScore.endCmd()
+            __showIgnoredRowWarnings(warnings)
+        } catch (e) {
+            __logError("firePreset exception: " + String(e))
+
+            if (started && !committed) {
+                try {
+                    curScore.endCmd()
+                } catch (eEnd) {}
+
+                __doUndoBestEffort()
+            }
+
+            Interactive.info(
+                        qsTr("Preset application failed."),
+                        qsTr("The operation was rolled back. Check the log for details."),
+                        [qsTr("Ok")]
+                        )
+        }
     }
 
-    // Model: { idx, name }
     ListModel { id: staffListModel }
 
-    // --- Helpers (adapted from keyswitch_creator_settings.qml) ---
+    // --- Staff list selection helpers (UI-only, no score interaction) -----------
+
     function bumpSelection() {
         selectedCountProp = Object.keys(selectedStaff).length
     }
@@ -2108,87 +1874,22 @@ MuseScore {
             sl.currentIndex = 0
     }
 
-    // --- Name/score helpers (trimmed to what's needed for the list) ---
-    function stripHtmlTags(s) { return String(s || "").replace(/\<[^>]*\>/g, "") }
-    function decodeHtmlEntities(s) {
-        var t = String(s || "")
-        t = t.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&#39;/g, "'")
-        t = t.replace(/&#([0-9]+);/g, function(_, n) { return String.fromCharCode(parseInt(n, 10) || 0) })
-        t = t.replace(/&#x([0-9a-fA-F]+);/g, function(_, h) { return String.fromCharCode(parseInt(h, 16) || 0) })
-        return t
-    }
-    function cleanName(s) { return String(s || '').split('\r\n').join(' ').split('\n').join(' ') }
-    function normalizeUiText(s) { return cleanName(decodeHtmlEntities(stripHtmlTags(s))) }
-
-    function staffBaseTrack(staffIdx) { return staffIdx * 4 }
-
-    function nameForPart(p, tick) {
-        if (!p) return ''
-        var nm = (p.longName && p.longName.length) ? p.longName
-                                                   : (p.partName && p.partName.length) ? p.partName
-                                                                                       : (p.shortName && p.shortName.length) ? p.shortName : ''
-        if (!nm && p.instrumentAtTick) {
-            var inst = p.instrumentAtTick(tick || 0)
-            if (inst && inst.longName && inst.longName.length) nm = inst.longName
-        }
-        return normalizeUiText(nm)
-    }
-
-    function partForStaff(staffIdx) {
-        if (!curScore || !curScore.parts) return null
-        var t = staffBaseTrack(staffIdx)
-        for (var i = 0; i < curScore.parts.length; ++i) {
-            var p = curScore.parts[i]
-            if (t >= p.startTrack && t < p.endTrack) return p
-        }
-        return null
-    }
-
-    function staffNameByIdx(staffIdx) {
-        for (var i = 0; i < staffListModel.count; ++i) {
-            var item = staffListModel.get(i)
-            if (item && item.idx === staffIdx) return cleanName(item.name)
-        }
-        var base = nameForPart(partForStaff(staffIdx), 0) || qsTr("Unknown instrument")
-        return cleanName(base + ': ' + qsTr('Staff %1').arg(1))
-    }
-
-    function buildStaffListModel() {
-        staffListModel.clear()
-        if (curScore && curScore.parts) {
-            for (var pIdx = 0; pIdx < curScore.parts.length; ++pIdx) {
-                var p = curScore.parts[pIdx]
-                var baseStaff = Math.floor(p.startTrack / 4)
-                var numStaves = Math.floor((p.endTrack - p.startTrack) / 4)
-                var partName = nameForPart(p, 0)
-                var cleanPart = cleanName(partName)
-                for (var sOff = 0; sOff < numStaves; ++sOff) {
-                    var staffIdx = baseStaff + sOff
-                    var display = cleanPart + ': ' + qsTr('Staff %1').arg(sOff + 1)
-                    staffListModel.append({ idx: staffIdx, name: display })
-                }
-            }
-        }
-        // Do not auto-select any staff on open
-        var sl = orchestratorWin ? orchestratorWin.staffListRef : null
-        if (sl) sl.currentIndex = -1
-        clearSelection()
-    }
 
     // Ensure the list is populated and the window is visible when the plugin opens
     onRun: {
-        Log.info(tag, "onRun()")
+        Log.info(tag, "Hello Orchestrator")
+
         if (!orchestratorWin) {
             orchestratorWin = orchestratorWinComponent.createObject(root)
-            Log.info(tag, "window created: " + orchestratorWin)
+            Log.info(tag, "Window created: " + orchestratorWin)
         }
 
-        // ---------- Restore UI state (pre-show, no flicker) ----------
+        // Restore UI state (pre-show, no flicker)
         try {
             // Restore Settings panel state FIRST (drives width policy)
             root.settingsOpen = !!ocPrefs.lastSettingsOpen;
 
-            // Width locked to either base or expanded; mirror your toggle math
+            // Width locked to either base or expanded; mirror toggle math
             var targetW = root.settingsOpen ? (root.baseWidth + 607) : root.baseWidth;
             orchestratorWin.minimumWidth = targetW;
             orchestratorWin.maximumWidth = targetW;
@@ -2201,8 +1902,9 @@ MuseScore {
                 orchestratorWin.height = Math.max(minH, savedH);
             }
 
-            // Restore gridView before we populate cards (affects layout widths)
+            // Restore gridView before populating cards (affects layout widths)
             root.gridView = !!ocPrefs.lastGridView;
+
             // Restore position pre-show (best-effort; clamped again post-show)
             try {
                 var savedX = Number(ocPrefs.lastWindowX);
@@ -2212,13 +1914,12 @@ MuseScore {
                 if (haveSavedPos) {
                     orchestratorWin.x = savedX;
                     orchestratorWin.y = savedY;
-                    orchestratorWin._centeredOnce = true; // hard-disable any centering this session
+                    orchestratorWin._centeredOnce = true; // Hard-disable any centering this session
                 }
             } catch (e) {}
         } catch (e) {
             Log.error(tag, "Restore UI state failed: " + String(e));
         }
-        // -----------------------------------------------
 
         // Explicitly show/raise/activate the window and set its visibility state
         orchestratorWin.visibility = Window.Windowed
@@ -2227,7 +1928,7 @@ MuseScore {
         orchestratorWin.requestActivate()
 
         Qt.callLater(function () {
-            // --- Restore window position (ensure on-screen) ---
+            // Restore window position (ensure on-screen)
             try {
                 var s = orchestratorWin ? orchestratorWin.screen : null;
                 var r = s ? (s.availableGeometry || s.geometry) : null;
@@ -2252,13 +1953,14 @@ MuseScore {
             } catch (e) {
                 Log.error(tag, "Restore window position failed: " + String(e));
             }
-            // ---------------------------------------------------
 
-            Log.debug(tag, "post-show visible: " + orchestratorWin.visible + "   visibility: " + orchestratorWin.visibility)
+            Log.debug(tag, "Post-show visible: " + orchestratorWin.visible + " visibility: " + orchestratorWin.visibility)
             buildStaffListModel()
+
             // Load presets (Settings-backed) and apply the first preset to the UI
             loadPresetsFromSettings()
-            // --- Restore selected card (only when Settings panel is open) ---
+
+            // Restore selected card (only when Settings panel is open)
             try {
                 var model = orchestratorWin ? orchestratorWin.allPresetsModelRef : null;
                 var uiRef = orchestratorWin ? orchestratorWin.rootUIRef : null;
@@ -2276,7 +1978,7 @@ MuseScore {
                         });
                     }
                 } else if (uiRef) {
-                    uiRef.selectedIndex = -1; // normal mode: no persistent selection
+                    uiRef.selectedIndex = -1; // Normal mode: no persistent selection
                 }
             } catch (e) {
                 Log.error(tag, "Restore selected card failed: " + String(e));
@@ -2284,12 +1986,15 @@ MuseScore {
         })
     }
 
-    // ----- Self-managed top-level window for Orchestrator -----
+    //--------------------------------------------------------------------------------
+    // UI
+    //--------------------------------------------------------------------------------
+
     Component {
         id: orchestratorWinComponent
         Window {
             id: win
-            // Make absolutely sure the window is treated as a normal, non-modal top-level window
+            // Treat as a normal, non-modal, top-level window
             visibility: Window.Windowed
             modality: Qt.NonModal
             title: root.title
@@ -2301,7 +2006,6 @@ MuseScore {
             property alias presetTitleFieldRef: presetTitleField
             property alias noteButtonsPaneRef: noteButtonsPane
 
-            // Valid bitmask so the OS shows real resize affordances
             flags: Qt.Window
                    | Qt.WindowTitleHint
                    | Qt.WindowSystemMenuHint
@@ -2334,10 +2038,10 @@ MuseScore {
             onScreenChanged:  Qt.callLater(centerOnce)
 
             // Lock horizontal drag; allow vertical drag
-            width: baseWidth
-            minimumWidth:  baseWidth
-            maximumWidth:  baseWidth
-            minimumHeight: 380
+            width:          baseWidth
+            minimumWidth:   baseWidth
+            maximumWidth:   baseWidth
+            minimumHeight:  380
 
             // Save height while visible, so drag-resize is captured
             onHeightChanged: {
@@ -2382,10 +2086,6 @@ MuseScore {
                 easing.type: Easing.InOutQuad
             }
 
-
-            //--------------------------------------------------------------------------------
-            // UI
-            //--------------------------------------------------------------------------------
             ColumnLayout {
                 id: rootUI
                 // Keep the left panel at the base width and anchor it to the left,
@@ -2845,22 +2545,19 @@ MuseScore {
                 }
             }
 
-            // Optional: a subtle vertical separator at the right edge of the fixed panel
-            // AFTER   (robust: anchor to rootUI.right)
             Rectangle {
                 id: settingsSeparator
                 anchors.top: parent.top
                 anchors.bottom: parent.bottom
-                anchors.left: rootUI.right          // stick to the right edge of the left panel
-                anchors.leftMargin: -13             // the same visual inset as before
+                anchors.left: rootUI.right
+                anchors.leftMargin: -13 // the same visual inset as before
                 width: 1
                 color: ui.theme.strokeColor
 
-                // Use a fixed gap; the old computed expression depended on 'x' prematurely
+                // Use a fixed gap
                 property int sideGap: 13
             }
 
-            // --- New: narrow tools column just to the right of the separator ---
             ColumnLayout {
                 id: settingsTools
                 anchors.left: settingsSeparator.right
@@ -2920,6 +2617,7 @@ MuseScore {
                     });
                 }
 
+                // Unused since all actions trigger preset save
                 // FlatButton {
                 //     id: presetSaveButton
 
@@ -3401,32 +3099,15 @@ MuseScore {
                 anchors.bottomMargin: 12
                 spacing: 10
 
-                // RowLayout {
-                //     Layout.fillWidth: true
-                //     Layout.alignment: Qt.AlignTop
-                //     spacing: 8
-
-                //Layout.leftMargin:  rootUI.panelSidePadding
-                // Layout.leftMargin: presetScroll.rightPadding + rootUI.iconExtraRightMargin
-
-                // Add preset (placeholder)
-
-                // Item { Layout.fillWidth: true }
-
-
-                // }
-
-                // --- Preset title (editable) and Save button (aligned with note buttons) ---
                 RowLayout {
                     id: presetHeaderRow
                     Layout.fillWidth: true
-                    // Match the column spacing used below so left/right columns align perfectly
+                    // Match column spacing so left/right columns align
                     spacing: listAndButtonsRow.spacing
 
                     Layout.fillHeight: false
                     Layout.alignment: Qt.AlignTop
 
-                    // LEFT HEADER COLUMN: same width as the staff list (stavesBox)
                     Item {
                         id: presetTitleWrap
                         width: stavesBox.width
@@ -3442,13 +3123,11 @@ MuseScore {
                             width: 200
                             leftPadding: 10
 
-                            // Theme
                             color: ui.theme.fontPrimaryColor
                             selectionColor: Utils.colorWithAlpha(ui.theme.accentColor, ui.theme.accentOpacityNormal)
                             selectedTextColor: ui.theme.fontPrimaryColor
                             placeholderTextColor: Utils.colorWithAlpha(ui.theme.fontPrimaryColor, 0.3)
 
-                            // Neutral border when unfocused; accent only when focused
                             background: Rectangle {
                                 radius: 3
                                 color: ui.theme.textFieldColor
@@ -3456,7 +3135,6 @@ MuseScore {
                                 border.color: presetTitleField.activeFocus ? ui.theme.accentColor : ui.theme.strokeColor
                             }
 
-                            // Default caret position at the beginning on first render
                             Component.onCompleted: {
                                 cursorPosition = 0
                                 deselect()
@@ -3480,20 +3158,18 @@ MuseScore {
                             }
                         }
 
-                        // Don't spam disk writes
                         Timer {
                             id: presetNameSaveTimer
+                            // Don't spam disk writes with each keystroke
                             interval: 350
                             repeat: false
                             onTriggered: root.commitPresetNameOnly()
                         }
 
-                        // Stretch any extra space while preserving the two fixed-width columns above
                         Item { Layout.fillWidth: true }
                     }
                 }
 
-                // --- Sprint 1: Staves list row (ported from Keyswitch Creator) ---
                 // Keyboard handling at the container level: treat staves list as the focus target
                 Keys.priority: Keys.BeforeItem
                 Keys.onPressed: function (event) {
@@ -3505,7 +3181,7 @@ MuseScore {
                     var isCtrl = !!(event.modifiers & Qt.ControlModifier)
                     var isCmd  = !!(event.modifiers & Qt.MetaModifier)
 
-                    // Ctrl/Cmd + A -> select all staves
+                    // Select all staves
                     if ((isCtrl || isCmd) && event.key === Qt.Key_A) {
                         selectAll()
                         if (staffList.currentIndex < 0 && staffListModel.count > 0)
@@ -3514,7 +3190,7 @@ MuseScore {
                         return
                     }
 
-                    // Shift + Up/Down -> extend selection
+                    // Extend selection
                     if (isShift && (event.key === Qt.Key_Up || event.key === Qt.Key_Down)) {
                         var idx = staffList.currentIndex >= 0 ? staffList.currentIndex : 0
                         if (event.key === Qt.Key_Up)   idx = Math.max(0, idx - 1)
@@ -3566,7 +3242,6 @@ MuseScore {
                     }
                 }
 
-                // Visual list + note buttons (side-by-side)
                 RowLayout {
                     id: listAndButtonsRow
 
@@ -3574,31 +3249,25 @@ MuseScore {
                     Layout.fillHeight: true
                     spacing: settingsUI.anchors.leftMargin
 
-                    // --- Left: Staves list (fixed width like KSC) ---
+                    // --- Left: Staves multi-select list ---
                     GroupBox {
                         id: stavesBox
                         Layout.alignment: Qt.AlignTop
-                        // Do NOT stretch to fill the available height; cap at content height instead
-                        // (leaves the right note column free to keep growing with the window)
                         Layout.fillHeight: true
 
-                        // Exact same width policy as before
-                        Layout.preferredWidth: 200
-                        Layout.maximumWidth: 200
-                        Layout.minimumWidth: 200
+                        Layout.preferredWidth:  200
+                        Layout.maximumWidth:    200
+                        Layout.minimumWidth:    200
 
-                        // Height policy:
-                        // - Maximum height equals the total list content (stops after the last staff)
-                        // - Preferred height is the smaller of contentHeight and the available settingsUI height
-                        //   so we still behave nicely when the list is taller than the window.
                         Layout.maximumHeight: staffList ? staffList.contentHeight : 0
                         Layout.preferredHeight: Math.min(
                                                     staffList ? staffList.contentHeight : 0,
-                                                    settingsUI.height - 24 /* leave the panel's margins/spacing */
+                                                    settingsUI.height - 24 // Leave the panel's margins/spacing
                                                     )
 
                         padding: 0
                         background: Rectangle { color: ui.theme.backgroundPrimaryColor }
+
                         ScrollView {
                             id: stavesScroll
                             anchors.fill: parent
@@ -3618,6 +3287,7 @@ MuseScore {
                                     id: rowDelegate
                                     width: ListView.view.width
                                     height: 30
+                                    leftPadding: 10
 
                                     background: Rectangle {
                                         anchors.fill: parent
@@ -3655,7 +3325,6 @@ MuseScore {
                                         z: 10
                                     }
 
-                                    leftPadding: 10
                                     contentItem: Text {
                                         color: ui.theme.fontPrimaryColor
                                         font.bold: isRowSelected(index)
@@ -3691,7 +3360,6 @@ MuseScore {
                                     }
                                 }
 
-                                // (existing key handling unchanged)
                                 Keys.onPressed: function (event) {
                                     const isCmd = !!(event.modifiers & Qt.MetaModifier)
                                     const isCtrl = !!(event.modifiers & Qt.ControlModifier)
@@ -3743,7 +3411,7 @@ MuseScore {
                         }
                     }
 
-                    // --- Right: 8-note button column (MULTI-SELECT like staves list) ---
+                    // --- Right: 8-note multi-select button column ---
                     Item {
                         id: noteButtonsPane
                         Layout.alignment: Qt.AlignTop
@@ -3752,25 +3420,26 @@ MuseScore {
                         visible: true
 
                         // Button column is 180px wide; gap equals listAndButtonsRow.spacing;
-                        // dropdown gets a measured minimum width (ddMinWidth) so "+24" and the triangle fit.
+                        // dropdown gets a measured minimum width (ddMinWidth) so "+24" and dropdown icon fit.
                         // (Pane locks to that sum so columns align cleanly.)
-                        Layout.preferredWidth: 120 + listAndButtonsRow.spacing + ddMinWidth
-                        Layout.maximumWidth: 120 + listAndButtonsRow.spacing + ddMinWidth
-                        Layout.minimumWidth: 120 + listAndButtonsRow.spacing + ddMinWidth
+                        Layout.preferredWidth:  120 + listAndButtonsRow.spacing + ddMinWidth
+                        Layout.maximumWidth:    120 + listAndButtonsRow.spacing + ddMinWidth
+                        Layout.minimumWidth:    120 + listAndButtonsRow.spacing + ddMinWidth
 
-                        // --- Dropdown width probe (measure "+24" using the actual StyledDropdown font) ---
-                        StyledDropdown { id: _ddProbe; visible: false } // font may be undefined early
+                        // Dropdown width probe (measure "+24" using the actual StyledDropdown font)
+                        StyledDropdown { id: _ddProbe; visible: false } // Font may be undefined early
                         FontMetrics {
                             id: _ddFM
                             font: (_ddProbe && _ddProbe.font) ? _ddProbe.font : Qt.font({})
                         }
 
-                        //  text width of "+24" + indicator allowance
+                        // Text width of "+24" + indicator allowance
                         property int ddMinWidth: Math.ceil(_ddFM.advanceWidth("+24")) + 42
 
-                        // ---------- Multi-select state & helpers (pattern matches staves list) ----------
-                        // Map: row index -> true when selected
+                        // Multi-select state & helpers
+                        // Row index -> true when selected
                         property var selectedNotes: ({})
+
                         // Anchor for Shift-range operations
                         property int lastAnchorNoteIndex: -1
 
@@ -3778,10 +3447,12 @@ MuseScore {
                             selectedNotes = ({})
                             root.scheduleLiveCommit()
                         }
-                        // ---- Voice selection state (one voice per row; independent per row) ----
-                        // Map: row index -> 0|1|2|3 (selected voice), or undefined for none
-                        property var voiceByRow: ({})
+
                         property var pitchIndexByRow: ({})
+
+                        // Voice selection state (one voice per row; independent per row)
+                        // Row index -> 0|1|2|3 (selected voice), or undefined for none
+                        property var voiceByRow: ({})
 
                         function setVoiceForRow(rowIndex, v) {
                             // Disallow "no voice": clicking the same voice keeps it selected.
@@ -3793,16 +3464,16 @@ MuseScore {
                             // Live-commit after voice change
                             root.scheduleLiveCommit()
                         }
-                        // Default every row to Voice 0 (1 in UI) so it appears active initially
-                        // Map: row index -> dropdown index (0..48), 24 = "--" (0 semitones)
+
                         Component.onCompleted: {
                             var m = {}
                             for (var i = 0; i < noteButtonsModel.count; ++i) {
                                 m[i] = 24  // default 0 semitones
                             }
                             pitchIndexByRow = m
-                            // (voiceByRow initialization stays intact below)
+                            // (voiceByRow initialization below)
                         }
+
                         function isNoteSelected(i) {
                             return !!selectedNotes[i]
                         }
@@ -3846,14 +3517,14 @@ MuseScore {
                         // Model for buttons (top to bottom)
                         ListModel {
                             id: noteButtonsModel
-                            ListElement { name: qsTr("Top note")}
-                            ListElement { name: qsTr("Seventh note")}
-                            ListElement { name: qsTr("Sixth note")}
-                            ListElement { name: qsTr("Fifth note")}
-                            ListElement { name: qsTr("Fourth note")}
-                            ListElement { name: qsTr("Third note")}
-                            ListElement { name: qsTr("Second note")}
-                            ListElement { name: qsTr("Bottom note")}
+                            ListElement { name: qsTr("Top note") }
+                            ListElement { name: qsTr("Seventh note") }
+                            ListElement { name: qsTr("Sixth note") }
+                            ListElement { name: qsTr("Fifth note") }
+                            ListElement { name: qsTr("Fourth note") }
+                            ListElement { name: qsTr("Third note") }
+                            ListElement { name: qsTr("Second note") }
+                            ListElement { name: qsTr("Bottom note") }
 
                             // If rows are ever added later, default them to voice 0 (UI voice 1)
                             onCountChanged: {
@@ -3899,7 +3570,7 @@ MuseScore {
                             }
                         }
 
-                        // Non-interactive list; each row is a FlatButton delegate
+                        // Each row contains a Note button, Pitch dropdown, and Voice button delegate
                         ListView {
                             id: noteButtonsView
                             anchors.top: parent.top
@@ -3913,7 +3584,6 @@ MuseScore {
                             currentIndex: 0
 
                             delegate: Item {
-                                // Keep the same measured row height as before
                                 width: noteButtonsView.width
                                 height: _btnProbe.implicitHeight
 
@@ -3921,12 +3591,12 @@ MuseScore {
                                     id: rowContent
                                     anchors {
                                         left: parent.left
-                                        leftMargin: 5   // keep external gap equal to RowLayout spacing
+                                        leftMargin: 5   // Keep external gap equal to RowLayout spacing
                                         verticalCenter: parent.verticalCenter
                                     }
-                                    spacing: listAndButtonsRow.spacing + 5 // align with note buttons
+                                    spacing: listAndButtonsRow.spacing + 5 // Align with note buttons
 
-                                    // Left: the note button (multi-select accent)
+                                    // Left: the note button
                                     FlatButton {
                                         id: noteBtn
                                         width: 120
@@ -3937,7 +3607,7 @@ MuseScore {
                                         accentButton: isActive
                                         transparent: false
 
-                                        // --- Accent strip INSIDE the button, at its left edge ---
+                                        // Accent strip inside the button, on left edge
                                         Rectangle {
                                             id: noteActiveBar
                                             anchors {
@@ -3948,6 +3618,7 @@ MuseScore {
                                             width: 3
                                             radius: 1
                                             color: ui.theme.accentColor
+
                                             // Visible if ANY staff in the selected preset has this note-row active
                                             visible: {
                                                 var p = orchestratorWin && root.presets[rootUI.selectedIndex];
@@ -3969,13 +3640,13 @@ MuseScore {
                                                     || (mouse.modifiers & Qt.MetaModifier)
                                             var isShift = (mouse.modifiers & Qt.ShiftModifier)
                                             if (isShift) {
-                                                // Shift = extend selection to range (unchanged)
+                                                // Shift = extend selection to range
                                                 noteButtonsPane.selectRangeNote(index)
                                             } else if (ctrlOrCmd) {
-                                                // Cmd/Ctrl = explicit toggle (unchanged)
+                                                // Cmd/Ctrl = explicit toggle
                                                 noteButtonsPane.toggleNote(index)
                                             } else {
-                                                // Plain click = toggle on/off (NEW)
+                                                // Plain click = toggle on/off
                                                 noteButtonsPane.toggleNote(index)
                                             }
                                             // Keep keyboard focus/anchor behavior the same
@@ -3983,11 +3654,15 @@ MuseScore {
                                         }
                                     }
 
-                                    // Right: chromatic pitch transformer dropdown (+24…--…-24), revealed only when active
+                                    // Right: chromatic pitch transformer dropdown and voice toggles
+                                    // Default row to -- (no pitch change) and Voice 0 (1 in UI)
+                                    // Pitch dropdown index 0..48, 24 = "--", (+24…--…-24)
+                                    // Voice button index 0-3 (1-4 in UI)
+                                    // Shown only when note button is active
                                     Item {
                                         id: ddWrap
                                         height: _btnProbe.implicitHeight
-                                        // Show when the note is active; animate the width/opacity for a smooth reveal
+                                        // Animate width/opacity for a smooth reveal
                                         width: noteBtn.isActive ? noteButtonsPane.ddMinWidth : 0
                                         opacity: noteBtn.isActive ? 1.0 : 0.0
                                         enabled: noteBtn.isActive
@@ -3997,7 +3672,7 @@ MuseScore {
                                         StyledDropdown {
                                             id: pitchShift
                                             anchors.fill: parent
-                                            // +24..+1, -- (0), -1..-24
+                                            // +24..+1 -- -1..-24
                                             model: (function () {
                                                 var items = [], i
                                                 for (i = 24; i >= 1; --i) items.push({ text: "+" + i, value: i })
@@ -4017,7 +3692,6 @@ MuseScore {
                                         }
                                     }
 
-                                    // Voice toggles — revealed only when the note is active
                                     Item {
                                         id: voiceWrap
                                         height: _btnProbe.implicitHeight
@@ -4029,10 +3703,9 @@ MuseScore {
                                         Behavior on width { NumberAnimation { duration: 250; easing.type: Easing.InOutQuad } }
                                         Behavior on opacity{ NumberAnimation { duration: 250; easing.type: Easing.InOutQuad } }
 
-                                        // Voice toggles as a tight group (edges touching)
                                         Row {
                                             id: voiceRow
-                                            spacing: 0 // edges touching between voice buttons
+                                            spacing: 0 // Voice button edges touch to avoid unnatural spacing
                                             FlatButton {
                                                 id: voice1Btn
                                                 icon: IconCode.VOICE_1
@@ -4119,85 +3792,6 @@ MuseScore {
                                 }
                             }
 
-                        }
-
-                        // ---------------------- Notation Elements to Copy --------------------------
-                        Item {
-                            id: notationElementsWrapper
-
-                            anchors {
-                                left: parent.left
-                                right: parent.right
-                                top: noteButtonsView.bottom
-                                topMargin: 8
-                                bottom: parent.bottom
-                                // bottomMargin: 10   // faux bottom margin to align with staves list
-                            }
-
-                            clip: true
-
-                            // Convenience: current preset object or null
-                            function currentPreset() {
-                                var uiRef = orchestratorWin ? orchestratorWin.rootUIRef : null
-                                if (!uiRef || uiRef.selectedIndex < 0 || uiRef.selectedIndex >= presets.length) return null
-                                return presets[uiRef.selectedIndex]
-                            }
-
-                            // Write-through update helpers
-                            function toggleKey(key, on) {
-                                var p = currentPreset()
-                                if (!p) return
-                                if (!p.notationFilter) p.notationFilter = defaultNotationFilter()
-                                p.notationFilter[key] = !!on
-                                syncNotationAll(p.notationFilter)
-                                notifyPresetsMutated()
-                                savePresetsToSettings()
-                            }
-
-                            function toggleKeyInverse(key) {
-                                var p = currentPreset()
-                                if (!p) return
-                                if (!p.notationFilter) p.notationFilter = defaultNotationFilter()
-                                var cur = !!p.notationFilter[key]
-                                toggleKey(key, !cur)    // reuse your write-through, bookkeeping, and save
-                            }
-
-                            function setAllChecked(on) {
-                                var p = currentPreset()
-                                if (!p) return
-                                if (!p.notationFilter) p.notationFilter = defaultNotationFilter()
-                                setNotationAll(p.notationFilter, !!on)
-                                notifyPresetsMutated()
-                                savePresetsToSettings()
-                            }
-
-                            ColumnLayout {
-                                anchors.fill: parent
-                                // anchors.bottomMargin: 10
-                                anchors.leftMargin: 0
-                                anchors.rightMargin: 0
-                                anchors.topMargin: 0
-                                anchors.top: notationElementsWrapper.top
-                                spacing: 6
-
-                                // Label {
-                                //     text: qsTr("Notation Elements")
-                                //     font.bold: true
-                                //     color: ui.theme.fontPrimaryColor
-                                //     // Layout.topMargin: 10
-                                //     Layout.leftMargin: 5
-                                // }
-
-                                ColumnLayout {
-                                    // Fill the wrapper Item and leave a 10px faux margin at the bottom,
-                                    // matching the staves ListView’s (height: orchestratorWin.height - 10).
-                                    Layout.fillWidth: true
-                                    Layout.leftMargin: 5
-                                    spacing: 6
-
-                                    Item { Layout.fillHeight: true }
-                                }
-                            }
                         }
                     }
                 }
