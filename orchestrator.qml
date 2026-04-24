@@ -3506,12 +3506,11 @@ MuseScore {
 
                         visible: true
 
-                        // Button column is 180px wide; gap equals listAndButtonsRow.spacing;
-                        // dropdown gets a measured minimum width (ddMinWidth) so "+24" and dropdown icon fit.
-                        // (Pane locks to that sum so columns align cleanly.)
-                        Layout.preferredWidth:  120 + listAndButtonsRow.spacing + ddMinWidth
-                        Layout.maximumWidth:    120 + listAndButtonsRow.spacing + ddMinWidth
-                        Layout.minimumWidth:    120 + listAndButtonsRow.spacing + ddMinWidth
+                        readonly property bool hasFocusedStaff: (
+                                                                    orchestratorWin &&
+                                                                    orchestratorWin.staffListRef &&
+                                                                    orchestratorWin.staffListRef.currentIndex >= 0
+                                                                    )
 
                         // Dropdown width probe (measure "+36" using the actual StyledDropdown font)
                         StyledDropdown { id: _ddProbe; visible: false } // Font may be undefined early
@@ -3520,7 +3519,49 @@ MuseScore {
                             font: (_ddProbe && _ddProbe.font) ? _ddProbe.font : Qt.font({})
                         }
                         // Text width of "+36" + indicator allowance
-                        property int ddMinWidth: Math.ceil(_ddFM.advanceWidth("+36")) + 42
+                        property int ddMinWidth: Math.ceil(_ddFM.advanceWidth("+36")) + 46
+
+                        FlatButton { id: _voice1Probe; icon: IconCode.VOICE_1; visible: false }
+                        FlatButton { id: _voice2Probe; icon: IconCode.VOICE_2; visible: false }
+                        FlatButton { id: _voice3Probe; icon: IconCode.VOICE_3; visible: false }
+                        FlatButton { id: _voice4Probe; icon: IconCode.VOICE_4; visible: false }
+
+                        readonly property int noteButtonWidth: 120
+                        readonly property int rowLeftInset: 5
+                        readonly property int rowGap: listAndButtonsRow.spacing + 15
+                        readonly property int voiceButtonsWidth:
+                            _voice1Probe.implicitWidth +
+                            _voice2Probe.implicitWidth +
+                            _voice3Probe.implicitWidth +
+                            _voice4Probe.implicitWidth
+                        readonly property int rowRightPad: 4
+
+                        readonly property int expandedPaneWidth:
+                            rowLeftInset +
+                            noteButtonWidth +
+                            rowGap +
+                            ddMinWidth +
+                            voiceButtonsWidth +
+                            rowRightPad
+
+                        enabled: hasFocusedStaff
+                        Layout.preferredWidth: noteButtonsReveal.width
+                        Layout.maximumWidth: noteButtonsReveal.width
+                        Layout.minimumWidth: noteButtonsReveal.width
+
+                        Item {
+                            id: noteButtonsReveal
+                            anchors.top: parent.top
+                            anchors.left: parent.left
+                            anchors.bottom: parent.bottom
+                            width: noteButtonsPane.hasFocusedStaff ? noteButtonsPane.expandedPaneWidth : 0
+                            opacity: noteButtonsPane.hasFocusedStaff ? 1.0 : 0.0
+                            clip: true
+                            enabled: noteButtonsPane.hasFocusedStaff
+
+                            Behavior on width { NumberAnimation { duration: 250; easing.type: Easing.InOutQuad } }
+                            Behavior on opacity { NumberAnimation { duration: 250; easing.type: Easing.InOutQuad } }
+                        }
 
                         // Multi-select state & helpers
                         // Row index -> true when selected
@@ -3659,6 +3700,7 @@ MuseScore {
                         // Each row contains a Note button, Pitch dropdown, and Voice button delegate
                         ListView {
                             id: noteButtonsView
+                            parent: noteButtonsReveal
                             anchors.top: parent.top
                             anchors.left: parent.left
                             width: parent.width
