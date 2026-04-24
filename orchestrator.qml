@@ -980,7 +980,7 @@ MuseScore {
     }
 
     function __rowLongLabel(rowIndex) {
-        if (rowIndex === 0) return "Top note"
+        if (rowIndex === 0) return "Top / Single note"
         if (rowIndex === 6) return "Second note"
         if (rowIndex === 7) return "Bottom note"
         return __rowLabel(rowIndex)
@@ -1037,7 +1037,7 @@ MuseScore {
             var names = []
             for (var j = 0; j < rowNums.length; ++j) {
                 var rowIndex = rowNums[j]
-                if (rowIndex === 0) names.push("Top note")
+                if (rowIndex === 0) names.push("Top / Single note")
                 else if (rowIndex === 6) names.push("Second note")
                 else if (rowIndex === 7) names.push("Bottom note")
                 else names.push(__rowLabel(rowIndex))
@@ -3519,7 +3519,7 @@ MuseScore {
                         // Model for buttons (top to bottom)
                         ListModel {
                             id: noteButtonsModel
-                            ListElement { name: qsTr("Top note") }
+                            ListElement { name: qsTr("Top / Single note") }
                             ListElement { name: qsTr("Seventh note") }
                             ListElement { name: qsTr("Sixth note") }
                             ListElement { name: qsTr("Fifth note") }
