@@ -28,7 +28,7 @@ MuseScore {
     description: qsTr("Preset system to quickly orchestrate sketches in MuseScore")
     categoryCode: "composing-arranging-tools"
     thumbnailName: "orchestrator.png"
-    version: "0.2.5"
+    version: "0.2.6"
 
     //--------------------------------------------------------------------------------
     // Log Engine
@@ -88,7 +88,7 @@ MuseScore {
     }
 
     // In-memory presets array
-    // Schema: [{ id, name, staves:[int...], rows:[{active:bool, voice:0..3, offset:-24..24} x8] }, ...]
+    // Schema: [{ id, name, staves:[int...], rows:[{active:bool, voice:0..3, offset:-36..36} x8] }, ...]
     // Note: voice is API-native: 0..3 (Cursor.voice is #track % 4)
     property var presets: ([])
     property bool suppressApplyPreset: false
@@ -110,24 +110,27 @@ MuseScore {
         } catch (e) {}
     }
 
-    // Pitch offset <-> dropdown index mapping (0..48, 24 == 0 semitones)
+    property int pitchOffsetMax: 36
+    readonly property int pitchCenterIndex: pitchOffsetMax
+
+    // Pitch offset <-> dropdown index mapping (0..72, 36 == 0 semitones)
     function pitchValueToIndex(v) {
         var n = Number(v) || 0
-        if (n > 24) n = 24
-        if (n < -24) n = -24
-        if (n > 0) return 24 - n
-        if (n === 0) return 24
-        return 24 + (-n)
+        if (n > root.pitchOffsetMax) n = root.pitchOffsetMax
+        if (n < -root.pitchOffsetMax) n = -root.pitchOffsetMax
+        if (n > 0) return root.pitchCenterIndex - n
+        if (n === 0) return root.pitchCenterIndex
+        return root.pitchCenterIndex + (-n)
     }
     function pitchIndexToValue(ix) {
-        var i = Number(ix) || 24
+        var i = Number(ix)
+        if (isNaN(i)) i = root.pitchCenterIndex
         if (i < 0) i = 0
-        if (i > 48) i = 48
-        if (i < 24) return 24 - i
-        if (i === 24) return 0
-        return -(i - 24)
+        if (i > (root.pitchOffsetMax * 2)) i = root.pitchOffsetMax * 2
+        if (i < root.pitchCenterIndex) return root.pitchCenterIndex - i
+        if (i === root.pitchCenterIndex) return 0
+        return -(i - root.pitchCenterIndex)
     }
-
     function __ensurePresetStaffMeta(presetObj) {
         if (!presetObj.staffMetaByStaffIdx)
             presetObj.staffMetaByStaffIdx = {}
@@ -552,7 +555,7 @@ MuseScore {
             for (var i = 0; i < 8; ++i) {
                 var active = nb ? !!nb.selectedNotes[i] : false;
                 var voice = Number(nb && nb.voiceByRow ? (nb.voiceByRow[i] ?? 0) : 0);
-                var pitchIx = (nb && nb.pitchIndexByRow && nb.pitchIndexByRow[i] !== undefined) ? nb.pitchIndexByRow[i] : 24;
+                var pitchIx = (nb && nb.pitchIndexByRow && nb.pitchIndexByRow[i] !== undefined) ? nb.pitchIndexByRow[i] : root.pitchCenterIndex;
                 var offset = pitchIndexToValue(pitchIx);
                 rows.push({ active: active, offset: offset, voice: voice });
             }
@@ -568,7 +571,7 @@ MuseScore {
         for (var i = 0; i < 8; ++i) {
             var active  = nb ? !!nb.selectedNotes[i] : false;
             var voice   = Number(nb && nb.voiceByRow ? (nb.voiceByRow[i] ?? 0) : 0);
-            var pitchIx = (nb && nb.pitchIndexByRow && nb.pitchIndexByRow[i] !== undefined) ? nb.pitchIndexByRow[i] : 24;
+            var pitchIx = (nb && nb.pitchIndexByRow && nb.pitchIndexByRow[i] !== undefined) ? nb.pitchIndexByRow[i] : root.pitchCenterIndex;
             var offset  = pitchIndexToValue(pitchIx);
             rows.push({ active: active, offset: offset, voice: voice });
         }
@@ -592,9 +595,9 @@ MuseScore {
             for (var i = 0; i < 8; ++i) vb[i] = 0;
             nb.voiceByRow = vb;
 
-            // 3) Reset pitch indices to center (24 == 0 semitones)
+            // 3) Reset pitch indices to center (36 == 0 semitones)
             var pi = {};
-            for (var j = 0; j < 8; ++j) pi[j] = 24;
+            for (var j = 0; j < 8; ++j) pi[j] = root.pitchCenterIndex;
             nb.pitchIndexByRow = pi;
         } finally {
             root.liveCommitEnabled = prevCommit;   // restore previous policy
@@ -3426,15 +3429,14 @@ MuseScore {
                         Layout.maximumWidth:    120 + listAndButtonsRow.spacing + ddMinWidth
                         Layout.minimumWidth:    120 + listAndButtonsRow.spacing + ddMinWidth
 
-                        // Dropdown width probe (measure "+24" using the actual StyledDropdown font)
+                        // Dropdown width probe (measure "+36" using the actual StyledDropdown font)
                         StyledDropdown { id: _ddProbe; visible: false } // Font may be undefined early
                         FontMetrics {
                             id: _ddFM
                             font: (_ddProbe && _ddProbe.font) ? _ddProbe.font : Qt.font({})
                         }
-
-                        // Text width of "+24" + indicator allowance
-                        property int ddMinWidth: Math.ceil(_ddFM.advanceWidth("+24")) + 42
+                        // Text width of "+36" + indicator allowance
+                        property int ddMinWidth: Math.ceil(_ddFM.advanceWidth("+36")) + 42
 
                         // Multi-select state & helpers
                         // Row index -> true when selected
@@ -3468,7 +3470,7 @@ MuseScore {
                         Component.onCompleted: {
                             var m = {}
                             for (var i = 0; i < noteButtonsModel.count; ++i) {
-                                m[i] = 24  // default 0 semitones
+                                m[i] = root.pitchCenterIndex // default 0 semitones
                             }
                             pitchIndexByRow = m
                             // (voiceByRow initialization below)
@@ -3656,7 +3658,7 @@ MuseScore {
 
                                     // Right: chromatic pitch transformer dropdown and voice toggles
                                     // Default row to -- (no pitch change) and Voice 0 (1 in UI)
-                                    // Pitch dropdown index 0..48, 24 = "--", (+24…--…-24)
+                                    // Pitch dropdown index 0..72, 36 = "--", (+36…--…-36)
                                     // Voice button index 0-3 (1-4 in UI)
                                     // Shown only when note button is active
                                     Item {
@@ -3672,19 +3674,24 @@ MuseScore {
                                         StyledDropdown {
                                             id: pitchShift
                                             anchors.fill: parent
-                                            // +24..+1 -- -1..-24
+                                            // +36..+1 -- -1..-36
                                             model: (function () {
                                                 var items = [], i
-                                                for (i = 24; i >= 1; --i) items.push({ text: "+" + i, value: i })
+                                                for (i = root.pitchOffsetMax; i >= 1; --i) items.push({ text: "+" + i, value: i })
                                                 items.push({ text: "--", value: 0 })
-                                                for (i = -1; i >= -24; --i) items.push({ text: "" + i, value: i })
+                                                for (i = -1; i >= -root.pitchOffsetMax; --i) items.push({ text: "" + i, value: i })
                                                 return items
                                             })()
                                             currentIndex: (noteButtonsPane.pitchIndexByRow[index] !== undefined)
-                                                          ? noteButtonsPane.pitchIndexByRow[index] : 24
+                                                          ? noteButtonsPane.pitchIndexByRow[index] : root.pitchCenterIndex
                                             onActivated: function(ix, value) {
+                                                var selectedValue = Number(value)
+                                                if (isNaN(selectedValue)) {
+                                                    selectedValue = root.pitchIndexToValue(ix)
+                                                }
+                                                var normalizedIndex = root.pitchValueToIndex(selectedValue)
                                                 var m = Object.assign({}, noteButtonsPane.pitchIndexByRow)
-                                                m[index] = ix
+                                                m[index] = normalizedIndex
                                                 noteButtonsPane.pitchIndexByRow = m
                                                 // Live-commit after pitch change
                                                 root.scheduleLiveCommit()
