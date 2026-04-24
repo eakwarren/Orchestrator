@@ -755,7 +755,7 @@ MuseScore {
                 if (newSel >= 0 && newSel < presets.length) {
                     tf.text = String(presets[newSel].name || qsTr("New Preset"));
                 } else {
-                    tf.text = qsTr("New Preset");
+                    tf.text = qsTr("");
                 }
                 tf.cursorPosition = 0;
                 tf.deselect();
