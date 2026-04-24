@@ -1293,6 +1293,83 @@ MuseScore {
         }
     }
 
+    function __snapshotSourceSelectionForRestore() {
+        if (!curScore ||
+                !curScore.selection)
+            return null
+
+        var sourceStaffIdx = __selectionSingleStaffIndexOrNull()
+        var sourceVoiceIdx = __selectionSingleVoiceIndexOrNull()
+        if (sourceStaffIdx === null || sourceVoiceIdx === null)
+            return null
+        if (sourceStaffIdx < 0 || sourceVoiceIdx < 0)
+            return null
+
+        var segs = __getSourceSelectionSegments()
+        if (!segs.start)
+            return null
+
+        var startTick = (segs.start.tick !== undefined) ? Number(segs.start.tick) : 0
+        var endTickExclusive = (segs.end && segs.end.tick !== undefined) ? Number(segs.end.tick) : startTick
+
+        if (endTickExclusive <= startTick)
+            return null
+
+        return {
+            startTick: startTick,
+            endTick: endTickExclusive,
+            startStaff: sourceStaffIdx,
+            endStaff: sourceStaffIdx + 1
+        }
+    }
+
+    function __restoreSelection(snapshot) {
+        if (!snapshot ||
+                !curScore ||
+                !curScore.selection)
+            return false
+
+        Qt.callLater(function () {
+            if (!snapshot ||
+                    !curScore ||
+                    !curScore.selection)
+                return
+
+            var startedSelCmd = false
+            var ok = false
+
+            try { __clearScoreSelection() } catch (e0) {}
+
+            try {
+                if (curScore.startCmd) {
+                    curScore.startCmd()
+                    startedSelCmd = true
+                }
+            } catch (e1) {}
+
+            try {
+                ok = !!curScore.selection.selectRange(
+                            Number(snapshot.startTick),
+                            Number(snapshot.endTick),
+                            Number(snapshot.startStaff),
+                            Number(snapshot.endStaff)
+                            )
+            } catch (e2) {
+                ok = false
+            }
+
+            if (startedSelCmd) {
+                try { curScore.endCmd() } catch (e3) {}
+            }
+
+            if (!ok) {
+                __logWarn("firePreset: delayed selection restore failed")
+            }
+        })
+
+        return true
+    }
+
     // --- Overwrite modal helpers ------------------------------------------------
 
     function __trackHasNotesInTickRange(track, startTick, endTick) {
@@ -1689,6 +1766,7 @@ MuseScore {
             return
         }
 
+        var selectionSnapshot = __snapshotSourceSelectionForRestore()
         var skipOverwritePrompt = !!opts.skipOverwritePrompt
         if (!skipOverwritePrompt) {
             var overwriteStaffIds = __detectOverwriteStaffIds(targetStaffIds, startTick, endTick)
@@ -1797,6 +1875,9 @@ MuseScore {
             committed = true
 
             __showIgnoredRowWarnings(warnings)
+            if (!__restoreSelection(selectionSnapshot)) {
+                __logWarn("firePreset: could not schedule original selection restore after success")
+            }
         } catch (e) {
             __logError("firePreset exception: " + String(e))
 
@@ -1813,6 +1894,9 @@ MuseScore {
                         qsTr("The operation was rolled back. Check the log for details."),
                         [qsTr("Ok")]
                         )
+            if (!__restoreSelection(selectionSnapshot)) {
+                __logWarn("firePreset: could not schedule original selection restore after rollback")
+            }
         }
     }
 
