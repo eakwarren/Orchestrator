@@ -51,7 +51,8 @@ Developed with ❤️ by Eric Warren
 ## Known Issues
 Currently, a design constraint is that presets operations are based on an instrument's staff index. So presets made for one score layout, won’t necessarily translate to a different score layout. For example, presets made for the Classical Orchestra template won’t completely translate to the Symphony Orchestra template. The instruments, their order, and number of staves, don’t match. I'm working on a design that uses semi-unique identifiers based on `musicXmlId|normalizedstaffname|staffindex` that will map across score layouts.
 
-Changing voices and selecting multiple voices in an instrument sometimes produces wrong results or crashes MuseScore. It's a work-in-progress. For now, I recommend leaving all settings on the default Voice 1.
+> [!CAUTION]
+> Changing voices or selecting multiple voices in an instrument sometimes produces wrong results or crashes MuseScore. It's a work-in-progress. For now, I recommend leaving all settings on the default Voice 1.
 
 View known issues on [GitHub](https://github.com/eakwarren/Orchestrator/issues)
 
