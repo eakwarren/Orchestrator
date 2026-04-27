@@ -71,4 +71,5 @@ MuseScore Studio developers, wherever they may roam.
 
 
 ## Release Notes
-TBD
+v0.2.6 4/27/26
+- Initial beta release
