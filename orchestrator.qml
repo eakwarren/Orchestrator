@@ -2904,6 +2904,7 @@ MuseScore {
 
                 FlatButton {
                     icon: IconCode.BRUSH
+                    enabled: (allPresetsModel.count > 0)
                     toolTipTitle: qsTr("Color preset")
                     onClicked: {
                         var uiRef = orchestratorWin ? orchestratorWin.rootUIRef : null;
