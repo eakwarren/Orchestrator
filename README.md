@@ -1,7 +1,7 @@
 # Orchestrator
 A preset system to quickly orchestrate sketches in MuseScore Studio 4.7+
 
-<img width="913" height="686" alt="score_with_orchestrator_window" src="https://github.com/user-attachments/assets/9692d321-7c90-4b01-88e8-6929e04b0a2a" />
+https://github.com/user-attachments/assets/419d59cd-750a-4cd0-93bd-b69cb6eb9e18
 
 Developed with ❤️ by Eric Warren
   
