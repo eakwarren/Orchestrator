@@ -58,6 +58,7 @@ MuseScore {
     property int baseWidth: 300
     property bool settingsOpen: false
     property bool gridView: false
+    property bool usedInstView: false
     property var orchestratorWin: null
     property var selectedStaff: ({})
     property int selectedCountProp: 0
@@ -185,12 +186,101 @@ MuseScore {
             rows.push({ active: false, offset: 0, voice: 0 })
         return rows
     }
+
     function hasAnyActiveRows(rows) {
         if (!rows || !rows.length) return false;
         for (var i = 0; i < rows.length; ++i) {
             if (rows[i] && rows[i].active) return true;
         }
         return false;
+    }
+
+    function staffHasActiveRowsInPreset(presetObj, staffIdx) {
+        if (!presetObj || !presetObj.noteRowsByStaff)
+            return false;
+        var rows = presetObj.noteRowsByStaff[staffIdx];
+        return hasAnyActiveRows(rows || []);
+    }
+
+    function staffHasActiveRowsInCurrentPreset(staffIdx) {
+        var uiRef = orchestratorWin ? orchestratorWin.rootUIRef : null;
+        if (!uiRef || uiRef.selectedIndex < 0 || uiRef.selectedIndex >= presets.length)
+            return false;
+        return staffHasActiveRowsInPreset(presets[uiRef.selectedIndex], staffIdx);
+    }
+
+    function isStaffRowVisible(rowIndex) {
+        if (rowIndex < 0 || rowIndex >= staffListModel.count)
+            return false;
+        if (!root.usedInstView)
+            return true;
+        var item = staffListModel.get(rowIndex);
+        return !!item && staffHasActiveRowsInCurrentPreset(item.idx);
+    }
+
+    function firstVisibleStaffRowIndex() {
+        for (var i = 0; i < staffListModel.count; ++i) {
+            if (isStaffRowVisible(i))
+                return i;
+        }
+        return -1;
+    }
+
+    function lastVisibleStaffRowIndex() {
+        for (var i = staffListModel.count - 1; i >= 0; --i) {
+            if (isStaffRowVisible(i))
+                return i;
+        }
+        return -1;
+    }
+
+    function nextVisibleStaffRowIndex(fromRow, step) {
+        var dir = (step < 0) ? -1 : 1;
+        if (staffListModel.count <= 0)
+            return -1;
+
+        var row = Number(fromRow);
+        if (isNaN(row))
+            row = -1;
+
+        if (row < 0 || row >= staffListModel.count)
+            return dir > 0 ? firstVisibleStaffRowIndex() : lastVisibleStaffRowIndex();
+
+        row += dir;
+        while (row >= 0 && row < staffListModel.count) {
+            if (isStaffRowVisible(row))
+                return row;
+            row += dir;
+        }
+        return -1;
+    }
+
+    function pruneSelectionToVisibleStaffRows() {
+        if (!root.usedInstView)
+            return;
+
+        var ns = ({});
+        for (var k in selectedStaff) {
+            if (!selectedStaff.hasOwnProperty(k) || !selectedStaff[k])
+                continue;
+            var sid = Number(k);
+            if (staffHasActiveRowsInCurrentPreset(sid))
+                ns[k] = true;
+        }
+        selectedStaff = ns;
+        bumpSelection();
+    }
+
+    onUsedInstViewChanged: {
+        var sl = orchestratorWin ? orchestratorWin.staffListRef : null;
+        if (!sl)
+            return;
+
+        if (root.usedInstView) {
+            pruneSelectionToVisibleStaffRows();
+            if (sl.currentIndex >= 0 && !isStaffRowVisible(sl.currentIndex))
+                sl.currentIndex = firstVisibleStaffRowIndex();
+        }
     }
 
     function newPresetObject(name) {
@@ -1955,12 +2045,14 @@ MuseScore {
 
     function selectAll() {
         clearSelection()
-        for (var r = 0; r < staffListModel.count; ++r) setRowSelected(r, true)
+        for (var r = 0; r < staffListModel.count; ++r) {
+            if (isStaffRowVisible(r))
+                setRowSelected(r, true)
+        }
         var sl = orchestratorWin ? orchestratorWin.staffListRef : null
-        if (sl && sl.currentIndex < 0 && staffListModel.count > 0)
-            sl.currentIndex = 0
+        if (sl && sl.currentIndex < 0)
+            sl.currentIndex = firstVisibleStaffRowIndex()
     }
-
 
     // Ensure the list is populated and the window is visible when the plugin opens
     onRun: {
@@ -2738,6 +2830,8 @@ MuseScore {
                         presetFlick.contentY = 0;
 
                         // --- 2) Clear ALL selection state in the UI ---
+                        root.usedInstView = false;
+
                         clearSelection(); // staff multi-select map
                         if (orchestratorWin && orchestratorWin.staffListRef)
                             orchestratorWin.staffListRef.currentIndex = -1;
@@ -3189,8 +3283,7 @@ MuseScore {
                 RowLayout {
                     id: presetHeaderRow
                     Layout.fillWidth: true
-                    // Match column spacing so left/right columns align
-                    spacing: listAndButtonsRow.spacing
+                    spacing: 10
 
                     Layout.fillHeight: false
                     Layout.alignment: Qt.AlignTop
@@ -3255,6 +3348,15 @@ MuseScore {
 
                         Item { Layout.fillWidth: true }
                     }
+
+                    FlatButton {
+                        id: instView
+                        icon: root.usedInstView ? IconCode.SMALL_ARROW_RIGHT : IconCode.SMALL_ARROW_DOWN
+                        toolTipTitle: root.usedInstView ? qsTr("All instruments view") : qsTr("Active instruments view")
+                        onClicked: {
+                            root.usedInstView = !root.usedInstView
+                        }
+                    }
                 }
 
                 // Keyboard handling at the container level: treat staves list as the focus target
@@ -3265,25 +3367,29 @@ MuseScore {
                     if (!stavesFocused) return
 
                     var isShift = !!(event.modifiers & Qt.ShiftModifier)
-                    var isCtrl = !!(event.modifiers & Qt.ControlModifier)
-                    var isCmd  = !!(event.modifiers & Qt.MetaModifier)
+                    var isCtrl  = !!(event.modifiers & Qt.ControlModifier)
+                    var isCmd   = !!(event.modifiers & Qt.MetaModifier)
 
                     // Select all staves
                     if ((isCtrl || isCmd) && event.key === Qt.Key_A) {
                         selectAll()
-                        if (staffList.currentIndex < 0 && staffListModel.count > 0)
-                            staffList.currentIndex = 0
+                        if (staffList.currentIndex < 0)
+                            staffList.currentIndex = firstVisibleStaffRowIndex()
                         event.accepted = true
                         return
                     }
 
                     // Extend selection
                     if (isShift && (event.key === Qt.Key_Up || event.key === Qt.Key_Down)) {
-                        var idx = staffList.currentIndex >= 0 ? staffList.currentIndex : 0
-                        if (event.key === Qt.Key_Up)   idx = Math.max(0, idx - 1)
-                        if (event.key === Qt.Key_Down) idx = Math.min(staffListModel.count - 1, idx + 1)
-                        selectRange(idx)
-                        staffList.currentIndex = idx
+                        var step = (event.key === Qt.Key_Up) ? -1 : 1
+                        var startIdx = (staffList.currentIndex >= 0)
+                                ? staffList.currentIndex
+                                : (step > 0 ? firstVisibleStaffRowIndex() : lastVisibleStaffRowIndex())
+                        var idx = nextVisibleStaffRowIndex(startIdx, step)
+                        if (idx >= 0) {
+                            selectRange(idx)
+                            staffList.currentIndex = idx
+                        }
                         event.accepted = true
                         return
                     }
@@ -3297,8 +3403,8 @@ MuseScore {
                     sequences: [ "Meta+A", "Ctrl+A" ]
                     onActivated: {
                         selectAll()
-                        if (staffList.currentIndex < 0 && staffListModel.count > 0)
-                            staffList.currentIndex = 0
+                        if (staffList.currentIndex < 0)
+                            staffList.currentIndex = firstVisibleStaffRowIndex()
                     }
                 }
                 Shortcut {
@@ -3307,8 +3413,10 @@ MuseScore {
                     enabled: (staffListModel.count > 0)
                     sequences: [ "Shift+Up" ]
                     onActivated: {
-                        var cur = (staffList.currentIndex >= 0) ? staffList.currentIndex : 0
-                        var next = Math.max(0, cur - 1)
+                        var cur = (staffList.currentIndex >= 0) ? staffList.currentIndex : lastVisibleStaffRowIndex()
+                        var next = nextVisibleStaffRowIndex(cur, -1)
+                        if (next < 0)
+                            return
                         if (lastAnchorIndex < 0) lastAnchorIndex = cur
                         selectRange(next)
                         staffList.currentIndex = next
@@ -3320,9 +3428,10 @@ MuseScore {
                     enabled: (staffListModel.count > 0)
                     sequences: [ "Shift+Down" ]
                     onActivated: {
-                        var cur = (staffList.currentIndex >= 0) ? staffList.currentIndex : 0
-                        var last = Math.max(0, staffListModel.count - 1)
-                        var next = Math.min(last, cur + 1)
+                        var cur = (staffList.currentIndex >= 0) ? staffList.currentIndex : firstVisibleStaffRowIndex()
+                        var next = nextVisibleStaffRowIndex(cur, 1)
+                        if (next < 0)
+                            return
                         if (lastAnchorIndex < 0) lastAnchorIndex = cur
                         selectRange(next)
                         staffList.currentIndex = next
@@ -3368,81 +3477,76 @@ MuseScore {
                                 focus: true
                                 model: staffListModel
                                 height: orchestratorWin.height - 10
-                                spacing: 8
+                                spacing: root.usedInstView ? 0 : 8
+                                delegate: Item {
+                                    id: rowShell
+                                    property bool hasActiveRows: root.staffHasActiveRowsInCurrentPreset(model.idx)
+                                    property bool rowVisible: !root.usedInstView || hasActiveRows
 
-                                delegate: ItemDelegate {
-                                    id: rowDelegate
+                                    visible: rowVisible
                                     width: ListView.view.width
-                                    height: 30
-                                    leftPadding: 10
+                                    height: rowVisible ? (root.usedInstView ? 38 : 30) : 0
 
-                                    background: Rectangle {
-                                        anchors.fill: parent
-                                        color: isRowSelected(index) ? ui.theme.accentColor : "transparent"
-                                        opacity: isRowSelected(index) ? 0.65 : 1.0
-                                        radius: 3
-                                    }
+                                    ItemDelegate {
+                                        id: rowDelegate
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.top: parent.top
+                                        height: 30
+                                        leftPadding: 10
 
-                                    // Accent bar for staff with any active note rows
-                                    Rectangle {
-                                        id: activeNoteBar
-                                        anchors {
-                                            left: parent.left
-                                            top: parent.top
-                                            bottom: parent.bottom
+                                        background: Rectangle {
+                                            anchors.fill: parent
+                                            color: isRowSelected(index) ? ui.theme.accentColor : "transparent"
+                                            opacity: isRowSelected(index) ? 0.65 : 1.0
+                                            radius: 3
                                         }
-                                        width: 3
-                                        radius: 1
-                                        color: ui.theme.accentColor
-                                        visible: {
-                                            var p = orchestratorWin && root.presets[rootUI.selectedIndex];
-                                            if (!p || !p.noteRowsByStaff)
-                                                return false;
 
-                                            var sid = model.idx;
-                                            var rows = p.noteRowsByStaff[sid];
-                                            if (!rows)
-                                                return false;
-
-                                            for (var i = 0; i < rows.length; i++)
-                                                if (rows[i].active) return true;
-
-                                            return false;
+                                        // Accent bar for staff with any active note rows
+                                        Rectangle {
+                                            id: activeNoteBar
+                                            anchors {
+                                                left: parent.left
+                                                top: parent.top
+                                                bottom: parent.bottom
+                                            }
+                                            width: 3
+                                            radius: 1
+                                            color: ui.theme.accentColor
+                                            visible: rowShell.hasActiveRows
+                                            z: 10
                                         }
-                                        z: 10
-                                    }
 
-                                    contentItem: Text {
-                                        color: ui.theme.fontPrimaryColor
-                                        font.bold: isRowSelected(index)
-                                        elide: Text.ElideRight
-                                        text: cleanName(model.name)
-                                        textFormat: Text.PlainText
-                                        verticalAlignment: Text.AlignVCenter
-                                    }
+                                        contentItem: Text {
+                                            color: ui.theme.fontPrimaryColor
+                                            font.bold: isRowSelected(index)
+                                            elide: Text.ElideRight
+                                            text: cleanName(model.name)
+                                            textFormat: Text.PlainText
+                                            verticalAlignment: Text.AlignVCenter
+                                        }
 
-                                    MouseArea {
-                                        acceptedButtons: Qt.LeftButton
-                                        anchors.fill: parent
-                                        hoverEnabled: true
-                                        onClicked: function (mouse) {
-                                            var idx = index
-                                            var ctrlOrCmd = (mouse.modifiers & Qt.ControlModifier) || (mouse.modifiers & Qt.MetaModifier)
-                                            var isShift = (mouse.modifiers & Qt.ShiftModifier)
-
-                                            if (isShift)
-                                                selectRange(idx)
-                                            else if (ctrlOrCmd)
-                                                toggleRow(idx)
-                                            else
-                                                selectSingle(idx)
-
-                                            staffList.currentIndex = idx
-                                            staffList.forceActiveFocus()
-
-                                            // When user selects a staff, load that staff’s note rows
-                                            if (rootUI.selectedIndex >= 0)
-                                                applyPresetToUI(rootUI.selectedIndex, { preserveStaffSelection: true })
+                                        MouseArea {
+                                            acceptedButtons: Qt.LeftButton
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            onClicked: function (mouse) {
+                                                var idx = index
+                                                var ctrlOrCmd = (mouse.modifiers & Qt.ControlModifier) ||
+                                                        (mouse.modifiers & Qt.MetaModifier)
+                                                var isShift = (mouse.modifiers & Qt.ShiftModifier)
+                                                if (isShift)
+                                                    selectRange(idx)
+                                                else if (ctrlOrCmd)
+                                                    toggleRow(idx)
+                                                else
+                                                    selectSingle(idx)
+                                                staffList.currentIndex = idx
+                                                staffList.forceActiveFocus()
+                                                // When user selects a staff, load that staff’s note rows
+                                                if (rootUI.selectedIndex >= 0)
+                                                    applyPresetToUI(rootUI.selectedIndex, { preserveStaffSelection: true })
+                                            }
                                         }
                                     }
                                 }
@@ -3451,38 +3555,44 @@ MuseScore {
                                     const isCmd = !!(event.modifiers & Qt.MetaModifier)
                                     const isCtrl = !!(event.modifiers & Qt.ControlModifier)
                                     const isShift = !!(event.modifiers & Qt.ShiftModifier)
+
                                     if ((isCmd || isCtrl) && event.key === Qt.Key_A) {
                                         selectAll()
-                                        if (staffList.currentIndex < 0 && staffListModel.count > 0)
-                                            staffList.currentIndex = 0
+                                        if (staffList.currentIndex < 0)
+                                            staffList.currentIndex = firstVisibleStaffRowIndex()
                                         event.accepted = true
                                         return
                                     }
+
                                     if (event.key === Qt.Key_Up) {
-                                        var idx = Math.max(0, staffList.currentIndex - 1)
-                                        if (isShift) selectRange(idx); else selectSingle(idx)
-                                        staffList.currentIndex = idx
-
-                                        // keep current staff selection; just reload rows for the new focus
-                                        if (rootUI.selectedIndex >= 0)
-                                            applyPresetToUI(rootUI.selectedIndex, { preserveStaffSelection: true })
-
+                                        var startIdx = (staffList.currentIndex >= 0) ? staffList.currentIndex : lastVisibleStaffRowIndex()
+                                        var idx = nextVisibleStaffRowIndex(startIdx, -1)
+                                        if (idx >= 0) {
+                                            if (isShift) selectRange(idx); else selectSingle(idx)
+                                            staffList.currentIndex = idx
+                                            // keep current staff selection; just reload rows for the new focus
+                                            if (rootUI.selectedIndex >= 0)
+                                                applyPresetToUI(rootUI.selectedIndex, { preserveStaffSelection: true })
+                                        }
                                         event.accepted = true
                                         return
                                     }
+
                                     if (event.key === Qt.Key_Down) {
-                                        var idx2 = Math.min(staffListModel.count - 1, staffList.currentIndex + 1)
-                                        if (isShift) selectRange(idx2); else selectSingle(idx2)
-                                        staffList.currentIndex = idx2
-
-                                        // keep current staff selection; just reload rows for the new focus
-                                        if (rootUI.selectedIndex >= 0)
-                                            applyPresetToUI(rootUI.selectedIndex, { preserveStaffSelection: true })
-
+                                        var startIdx2 = (staffList.currentIndex >= 0) ? staffList.currentIndex : firstVisibleStaffRowIndex()
+                                        var idx2 = nextVisibleStaffRowIndex(startIdx2, 1)
+                                        if (idx2 >= 0) {
+                                            if (isShift) selectRange(idx2); else selectSingle(idx2)
+                                            staffList.currentIndex = idx2
+                                            // keep current staff selection; just reload rows for the new focus
+                                            if (rootUI.selectedIndex >= 0)
+                                                applyPresetToUI(rootUI.selectedIndex, { preserveStaffSelection: true })
+                                        }
                                         event.accepted = true
                                         return
                                     }
                                 }
+
                                 Keys.onShortcutOverride: function (event) {
                                     const isShift = !!(event.modifiers & Qt.ShiftModifier)
                                     const isCmd   = !!(event.modifiers & Qt.MetaModifier)
