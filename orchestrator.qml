@@ -28,7 +28,7 @@ MuseScore {
     description: qsTr("Preset system to quickly orchestrate sketches in MuseScore")
     categoryCode: "composing-arranging-tools"
     thumbnailName: "orchestrator.png"
-    version: "0.2.6"
+    version: "0.2.7a"
 
     //--------------------------------------------------------------------------------
     // Log Engine
@@ -140,39 +140,38 @@ MuseScore {
         return presetObj.staffMetaByStaffIdx
     }
 
-    function __instrumentMetaForStaff(staffIdx, tick) {
-        var out = {
-            instrumentId: "",
-            musicXmlId: ""
-        }
-
+    function __instrumentAtTickForStaff(staffIdx, tick) {
         var p = partForStaff(staffIdx)
         if (!p)
-            return out
-
-        var t = Number(tick || 0)
+            return null
+        var t = Number(tick ?? 0)
         var inst = null
-
         try {
             if (p.instrumentAtTick)
                 inst = p.instrumentAtTick(t)
         } catch (e0) {}
-
         if (!inst) {
             try {
                 if (p.instruments && p.instruments.length)
                     inst = p.instruments[0]
             } catch (e1) {}
         }
+        return inst
+    }
 
+    function __instrumentMetaForStaff(staffIdx, tick) {
+        var out = {
+            instrumentId: "",
+            musicXmlId: ""
+        }
+        var inst = __instrumentAtTickForStaff(staffIdx, tick)
         if (!inst)
             return out
-
-        try { out.instrumentId = String(inst.instrumentId || "") } catch (e2) {}
-        try { out.musicXmlId = String(inst.musicXmlId || "") } catch (e3) {}
-
+        try { out.instrumentId = String(inst.instrumentId ?? "") } catch (e2) {}
+        try { out.musicXmlId = String(inst.musicXmlId ?? "") } catch (e3) {}
         return out
     }
+
 
     function __capturePresetStaffMeta(presetObj, staffIdx, tick) {
         if (!presetObj || staffIdx === undefined || staffIdx === null || staffIdx < 0)
@@ -1095,6 +1094,59 @@ MuseScore {
 
     function normalizeUiText(s) {
         return cleanName(decodeHtmlEntities(stripHtmlTags(s)))
+    }
+
+    function normalizeInstLongName(s) {
+        var out = normalizeUiText(s)
+        out = String(out ?? "").toLowerCase()
+        out = out.replace(/♭/g, "b").replace(/♯/g, "sharp")
+        out = out.replace(/[^a-z0-9]+/g, "")
+        return out
+    }
+
+    function musicXmlIdForStaff(staffIdx, tick) {
+        var inst = __instrumentAtTickForStaff(staffIdx, tick)
+        var out = ""
+        try { out = String((inst && inst.musicXmlId) ?? "") } catch (e0) {}
+        if (out.length)
+            return out
+
+        var p = partForStaff(staffIdx)
+        try { out = String((p && p.instrumentId) ?? "") } catch (e1) {}
+        return out
+    }
+
+    function instLongNameForStaff(staffIdx, tick) {
+        var inst = __instrumentAtTickForStaff(staffIdx, tick)
+        var out = ""
+        try { out = String((inst && inst.longName) ?? "") } catch (e0) {}
+        out = normalizeUiText(out)
+        if (out.length)
+            return out
+        return nameForPart(partForStaff(staffIdx), tick)
+    }
+
+    function staffOffsetWithinInst(staffIdx) {
+        var sid = Number(staffIdx)
+        if (isNaN(sid) || sid < 0)
+            return -1
+        var p = partForStaff(sid)
+        if (!p)
+            return -1
+        var baseStaff = Math.floor(p.startTrack / 4)
+        return sid - baseStaff
+    }
+
+    function stableKeyForStaff(staffIdx, tick) {
+        var sid = Number(staffIdx)
+        if (isNaN(sid) || sid < 0)
+            return ""
+        var mx = musicXmlIdForStaff(sid, tick)
+        var nm = normalizeInstLongName(instLongNameForStaff(sid, tick))
+        var off = staffOffsetWithinInst(sid)
+        if (!mx.length || !nm.length || off < 0)
+            return ""
+        return mx + "|" + nm + "|" + off
     }
 
     function nameForPart(p, tick) {
