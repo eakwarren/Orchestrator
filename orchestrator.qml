@@ -28,7 +28,7 @@ MuseScore {
     description: qsTr("Preset system to quickly orchestrate sketches in MuseScore")
     categoryCode: "composing-arranging-tools"
     thumbnailName: "orchestrator.png"
-    version: "0.2.7a"
+    version: "0.2.7b"
 
     //--------------------------------------------------------------------------------
     // Log Engine
@@ -89,11 +89,13 @@ MuseScore {
     }
 
     // In-memory presets array
-    // Schema: [{ id, name, staves:[int...], rows:[{active:bool, voice:0..3, offset:-36..36} x8] }, ...]
-    // Note: voice is API-native: 0..3 (Cursor.voice is #track % 4)
     property var presets: ([])
     property bool suppressApplyPreset: false
     property bool creatingNewPreset: false
+    property var activeScoreRegistry: ({
+                                           entries: [],
+                                           byStableKey: ({})
+                                       })
 
     // Persist 1-across vs 2-across preset layout
     onGridViewChanged: {
@@ -295,8 +297,70 @@ MuseScore {
         }
     }
 
-    // Selected staff indices (sorted) from the staves list
+    function clearActiveScoreRegistry() {
+        activeScoreRegistry = ({
+                                   entries: [],
+                                   byStableKey: ({})
+                               })
+    }
+
+    function rebuildActiveScoreRegistry(tick) {
+        var registry = {
+            entries: [],
+            byStableKey: ({})
+        }
+
+        if (!curScore || !curScore.parts) {
+            activeScoreRegistry = registry
+            return registry
+        }
+
+        var t = Number(tick ?? 0)
+        for (var pIdx = 0; pIdx < curScore.parts.length; ++pIdx) {
+            var p = curScore.parts[pIdx]
+            if (!p)
+                continue
+
+            var baseStaff = Math.floor(p.startTrack / 4)
+            var numStaves = Math.floor((p.endTrack - p.startTrack) / 4)
+            for (var sOff = 0; sOff < numStaves; ++sOff) {
+                var staffIdx = baseStaff + sOff
+                var stableKey = stableKeyForStaff(staffIdx, t)
+                if (!stableKey.length) {
+                    __logWarn("activeScoreRegistry: skipped staffIdx=" + staffIdx + " reason=empty stableKey")
+                    continue
+                }
+
+                var entry = {
+                    stableKey: stableKey,
+                    musicXmlId: musicXmlIdForStaff(staffIdx, t),
+                    normalizedInstLongName: normalizeInstLongName(instLongNameForStaff(staffIdx, t)),
+                    staffOffsetWithinInst: sOff,
+                    staffIdx: staffIdx
+                }
+
+                registry.entries.push(entry)
+
+                if (!registry.byStableKey[stableKey])
+                    registry.byStableKey[stableKey] = []
+                registry.byStableKey[stableKey].push(staffIdx)
+            }
+        }
+
+        activeScoreRegistry = registry
+        __logDebug("activeScoreRegistry entries: " + registry.entries.length)
+        return registry
+    }
+
+    function activeScoreRegistryStaffIdxsForStableKey(stableKey) {
+        if (!activeScoreRegistry || !activeScoreRegistry.byStableKey)
+            return []
+        var arr = activeScoreRegistry.byStableKey[String(stableKey)] || []
+        return arr.slice(0)
+    }
+
     function getSelectedStaffArray() {
+
         var out = []
         for (var k in selectedStaff) {
             if (selectedStaff.hasOwnProperty(k) && selectedStaff[k]) out.push(Number(k))
@@ -1196,6 +1260,9 @@ MuseScore {
                 }
             }
         }
+
+        rebuildActiveScoreRegistry(0)
+
         // Do not auto-select any staff on open
         var sl = orchestratorWin ? orchestratorWin.staffListRef : null
         if (sl) sl.currentIndex = -1
