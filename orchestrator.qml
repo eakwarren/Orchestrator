@@ -334,13 +334,16 @@ MuseScore {
             var s = String(ocPrefs.presetsJSON || "")
             var parsed = s.length ? JSON.parse(s) : []
 
-            Log.info(tag, "ocPrefs presets JSON: " + s)
-            if (!parsed || !parsed.length) parsed = [ newPresetObject(qsTr("New Preset")) ]
+            if (!parsed || !parsed.length) {
+                parsed = [ newPresetObject(qsTr("New Preset")) ]
+            }
 
             presets = parsed
 
+            __logDebug("ocPrefs presets count: " + presets.length)
+            logPrettyPresets("ocPrefs presets:", presets)
         } catch (e) {
-            Log.debug(tag, "Failed to parse ocPrefs.presetsJSON: " + e)
+            __logDebug("Failed to parse ocPrefs.presetsJSON: " + e)
             presets = [ newPresetObject(qsTr("New Preset")) ]
         }
 
@@ -352,13 +355,174 @@ MuseScore {
             ocPrefs.presetsJSON = JSON.stringify(presets, null, 2)
             if (ocPrefs.sync) { try { ocPrefs.sync() } catch (e2) {} }
         } catch (e) {
-            Log.error(tag, "Failed to save presets: " + String(e))
+            __logError("Failed to save presets: " + String(e))
         }
     }
 
     function notifyPresetsMutated() {
         // Reassign to a fresh array reference so QML bindings re-evaluate.
         presets = presets.slice(0);
+    }
+
+    function isInlineScalarForLog(value) {
+        if (value === null || value === undefined)
+            return true
+
+        var t = typeof value
+        return t === "string" || t === "number" || t === "boolean"
+    }
+
+    function indentForLog(level) {
+        var out = ""
+        for (var i = 0; i < level; i++)
+            out += "    "
+        return out
+    }
+
+    function stripOneIndentForLog(line, level) {
+        var pad = indentForLog(level)
+        if (line.indexOf(pad) === 0)
+            return line.slice(pad.length)
+        return line
+    }
+
+    function formatInlineForLog(value) {
+        if (value === null)
+            return "null"
+
+        if (value === undefined)
+            return "undefined"
+
+        var t = typeof value
+
+        if (t === "string" || t === "number" || t === "boolean")
+            return String(value)
+
+        if (Array.isArray(value)) {
+            if (!value.length)
+                return "[]"
+
+            for (var a = 0; a < value.length; a++) {
+                if (!isInlineScalarForLog(value[a]))
+                    return null
+            }
+
+            var inlineItems = []
+            for (var aa = 0; aa < value.length; aa++) {
+                inlineItems.push(String(formatInlineForLog(value[aa])))
+            }
+            return "[" + inlineItems.join(",") + "]"
+        }
+
+        if (t === "object") {
+            var keys = Object.keys(value)
+            if (!keys.length)
+                return "{}"
+
+            var maxInlineObjectProps = 3
+            if (keys.length > maxInlineObjectProps)
+                return null
+
+            var inlineParts = []
+            for (var k = 0; k < keys.length; k++) {
+                var key = keys[k]
+                var childValue = value[key]
+                if (!isInlineScalarForLog(childValue))
+                    return null
+                inlineParts.push(key + ": " + formatInlineForLog(childValue))
+            }
+
+            return "{" + inlineParts.join(", ") + "}"
+        }
+
+        return String(value)
+    }
+
+    function formatForLog(value, indent) {
+        indent = indent || 0
+
+        var pad = indentForLog(indent)
+        var childIndent = indent + 1
+        var childPad = indentForLog(childIndent)
+
+        var inline = formatInlineForLog(value)
+        if (inline !== null)
+            return pad + inline
+
+        if (Array.isArray(value)) {
+            var arrLines = [pad + "["]
+
+            for (var a = 0; a < value.length; a++) {
+                var formattedItem = formatForLog(value[a], childIndent)
+                var itemLines = formattedItem.split("\n")
+
+                for (var ai = 0; ai < itemLines.length; ai++) {
+                    arrLines.push(itemLines[ai])
+                }
+
+                if (a < value.length - 1)
+                    arrLines[arrLines.length - 1] += ","
+            }
+
+            arrLines.push(pad + "]")
+            return arrLines.join("\n")
+        }
+
+        if (typeof value === "object") {
+            var keys = Object.keys(value)
+            var objLines = [pad + "{"]
+
+            for (var k = 0; k < keys.length; k++) {
+                var key = keys[k]
+                var formattedVal = formatForLog(value[key], childIndent)
+                var valLines = formattedVal.split("\n")
+
+                if (valLines.length === 1) {
+                    objLines.push(
+                                childPad +
+                                key +
+                                ": " +
+                                stripOneIndentForLog(valLines[0], childIndent) +
+                                (k < keys.length - 1 ? "," : "")
+                                )
+                } else {
+                    objLines.push(
+                                childPad +
+                                key +
+                                ": " +
+                                stripOneIndentForLog(valLines[0], childIndent)
+                                )
+
+                    for (var vi = 1; vi < valLines.length; vi++) {
+                        objLines.push(valLines[vi])
+                    }
+
+                    if (k < keys.length - 1)
+                        objLines[objLines.length - 1] += ","
+                }
+            }
+
+            objLines.push(pad + "}")
+            return objLines.join("\n")
+        }
+
+        return pad + String(value)
+    }
+
+    function logPrettyPresets(prefix, obj) {
+        var pretty = formatForLog(obj, 0)
+        var lines = pretty.split("\n")
+
+        if (!lines.length) {
+            __logDebug(prefix)
+            return
+        }
+
+        __logDebug(prefix + " " + stripOneIndentForLog(lines[0], 0))
+
+        for (var i = 1; i < lines.length; i++) {
+            __logDebug(lines[i])
+        }
     }
 
     // --- Clipboard + helpers ----------------------------------------------------
@@ -2067,11 +2231,11 @@ MuseScore {
 
     // Ensure the list is populated and the window is visible when the plugin opens
     onRun: {
-        Log.info(tag, "Hello Orchestrator")
+        __logInfo("Hello Orchestrator")
 
         if (!orchestratorWin) {
             orchestratorWin = orchestratorWinComponent.createObject(root)
-            Log.info(tag, "Window created: " + orchestratorWin)
+            __logInfo("Window created: " + orchestratorWin)
         }
 
         // Restore UI state (pre-show, no flicker)
@@ -2108,7 +2272,7 @@ MuseScore {
                 }
             } catch (e) {}
         } catch (e) {
-            Log.error(tag, "Restore UI state failed: " + String(e));
+            __logError("Restore UI state failed: " + String(e));
         }
 
         // Explicitly show/raise/activate the window and set its visibility state
@@ -2141,10 +2305,10 @@ MuseScore {
                     orchestratorWin.y = Math.max(minY, Math.min(maxY, savedY));
                 }
             } catch (e) {
-                Log.error(tag, "Restore window position failed: " + String(e));
+                __logError("Restore window position failed: " + String(e));
             }
 
-            Log.debug(tag, "Post-show visible: " + orchestratorWin.visible + " visibility: " + orchestratorWin.visibility)
+            __logDebug("Post-show visible: " + orchestratorWin.visible + " visibility: " + orchestratorWin.visibility)
             buildStaffListModel()
 
             // Load presets (Settings-backed) and apply the first preset to the UI
@@ -2171,7 +2335,7 @@ MuseScore {
                     uiRef.selectedIndex = -1; // Normal mode: no persistent selection
                 }
             } catch (e) {
-                Log.error(tag, "Restore selected card failed: " + String(e));
+                __logError("Restore selected card failed: " + String(e));
             }
         })
     }
@@ -2815,7 +2979,7 @@ MuseScore {
                 //     //toolTip: qsTr("Add preset (placeholder)")
                 //     onClicked: {
                 //         saveCurrentPreset()
-                //         Log.info(tag, "Preset saved: " + presetTitleField.text)
+                //         __logInfo("Preset saved: " + presetTitleField.text)
                 //     }
                 // }
 
