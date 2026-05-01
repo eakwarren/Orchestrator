@@ -265,8 +265,8 @@ MuseScore {
         return {
             id: String(Date.now()) + "-" + Math.random().toString(16).slice(2),
             name: String(name ?? qsTr("New Preset")),
-            noteRowsByStableKey: {},
-            backgroundColor: ""
+            backgroundColor: "",
+            noteRowsByStableKey: {}
         }
     }
 
@@ -674,7 +674,12 @@ MuseScore {
             noteRowsByStableKey: {}
         };
         clip.name = String(p.name ?? "");
-        clip.backgroundColor = p.backgroundColor ? colorToHex(p.backgroundColor) : "";
+        clip.backgroundColor = "";
+        if (p.backgroundColor) {
+            clip.backgroundColor = (typeof p.backgroundColor === "string")
+                    ? String(p.backgroundColor)
+                    : colorToHex(p.backgroundColor);
+        }
         var keys = __stableKeysWithAnyActive(p);
         for (var i = 0; i < keys.length; ++i) {
             var stableKey = keys[i];
@@ -718,9 +723,9 @@ MuseScore {
 
         // Restore backgroundColor (if any)
         if (presetClipboard.backgroundColor && presetClipboard.backgroundColor.length) {
-            p.backgroundColor = presetClipboard.backgroundColor;   // hex → parsed automatically
+            p.backgroundColor = presetClipboard.backgroundColor; // hex → parsed automatically
         } else {
-            try { delete p.backgroundColor; } catch(e) { p.backgroundColor = ""; }
+            try { delete p.backgroundColor; } catch(e) {}
         }
 
         // Reflect the new name in the title field immediately
@@ -3252,7 +3257,7 @@ MuseScore {
                                         var chosen = String(swatch).toLowerCase();
                                         var themeHex = String(ui.theme.accentColor).toLowerCase();
 
-                                        p.backgroundColor = swatch;
+                                        p.backgroundColor = colorToHex(swatch);
 
                                         // Force QML bindings to re-evaluate for the current card
                                         notifyPresetsMutated();
@@ -3287,7 +3292,7 @@ MuseScore {
                                         var chosen = String(swatch).toLowerCase();
                                         var themeHex = String(ui.theme.accentColor).toLowerCase();
 
-                                        p.backgroundColor = swatch;
+                                        p.backgroundColor = colorToHex(swatch);
 
                                         // Force QML bindings to re-evaluate for the current card
                                         notifyPresetsMutated();
@@ -3322,7 +3327,7 @@ MuseScore {
                                         var chosen = String(swatch).toLowerCase();
                                         var themeHex = String(ui.theme.accentColor).toLowerCase();
 
-                                        p.backgroundColor = swatch;
+                                        p.backgroundColor = colorToHex(swatch);
 
                                         // Force QML bindings to re-evaluate for the current card
                                         notifyPresetsMutated();
@@ -3357,7 +3362,7 @@ MuseScore {
                                         var chosen = String(swatch).toLowerCase();
                                         var themeHex = String(ui.theme.accentColor).toLowerCase();
 
-                                        p.backgroundColor = swatch;
+                                        p.backgroundColor = colorToHex(swatch);
 
                                         // Force QML bindings to re-evaluate for the current card
                                         notifyPresetsMutated();
@@ -3392,7 +3397,7 @@ MuseScore {
                                         var chosen = String(swatch).toLowerCase();
                                         var themeHex = String(ui.theme.accentColor).toLowerCase();
 
-                                        p.backgroundColor = swatch;
+                                        p.backgroundColor = colorToHex(swatch);
 
                                         // Force QML bindings to re-evaluate for the current card
                                         notifyPresetsMutated();
@@ -3427,7 +3432,7 @@ MuseScore {
                                         var chosen = String(swatch).toLowerCase();
                                         var themeHex = String(ui.theme.accentColor).toLowerCase();
 
-                                        p.backgroundColor = swatch;
+                                        p.backgroundColor = colorToHex(swatch);
 
                                         // Force QML bindings to re-evaluate for the current card
                                         notifyPresetsMutated();
@@ -3462,7 +3467,7 @@ MuseScore {
                                         var chosen = String(swatch).toLowerCase();
                                         var themeHex = String(ui.theme.accentColor).toLowerCase();
 
-                                        p.backgroundColor = swatch;
+                                        p.backgroundColor = colorToHex(swatch);
 
                                         // Force QML bindings to re-evaluate for the current card
                                         notifyPresetsMutated();
