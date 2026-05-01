@@ -28,7 +28,7 @@ MuseScore {
     description: qsTr("Preset system to quickly orchestrate sketches in MuseScore")
     categoryCode: "composing-arranging-tools"
     thumbnailName: "orchestrator.png"
-    version: "0.2.7f"
+    version: "0.2.7g"
 
     //--------------------------------------------------------------------------------
     // Log Engine
@@ -303,13 +303,6 @@ MuseScore {
             names.push(nm)
         }
         return names.join(", ")
-    }
-
-    function clearActiveScoreRegistry() {
-        activeScoreRegistry = ({
-                                   entries: [],
-                                   byStableKey: ({})
-                               })
     }
 
     function rebuildActiveScoreRegistry(tick) {
@@ -1041,7 +1034,7 @@ MuseScore {
         if (uiRef) {
             var newSel = (presets.length > 0) ? Math.min(idx, presets.length - 1) : -1;
 
-            // --- NEW: update the title immediately (authoritative) ---
+            // Update the title immediately (authoritative)
             if (tf) {
                 if (newSel >= 0 && newSel < presets.length) {
                     tf.text = String(presets[newSel].name || qsTr("New Preset"));
@@ -1595,26 +1588,6 @@ MuseScore {
             return true
         } catch (e) {
             return false
-        }
-    }
-
-    function __dbgPitchNote(label) {
-        try {
-            var els = curScore.selection.elements;
-            if (!els || !els.length) {
-                __logDebug(label + " <no selection>");
-                return;
-            }
-            var n = els[0];
-            __logDebug(
-                        label +
-                        " pitch=" + n.pitch +
-                        " tick=" + (n.tick !== undefined ? n.tick : "?") +
-                        " tieBack=" + !!n.tieBack +
-                        " tieForward=" + !!n.tieForward
-                        );
-        } catch (e) {
-            __logDebug(label + " <exception>");
         }
     }
 
@@ -2594,11 +2567,11 @@ MuseScore {
                 //  - Push toolbar icons slightly more left than the cards (visual rhythm)
                 readonly property int iconExtraRightMargin: 16
 
-                // --- Sprint 1 data & filtering ---
+                // --- Preset list filtering ---
                 property string setFilterText: ""
                 // Single-selection: -1 = none, otherwise model index in allPresetsModel
                 property int selectedIndex: -1
-                // Backing model of all presets (placeholder content for Sprint 1)
+                // Backing model of all presets (settings-backed)
                 ListModel {
                     id: allPresetsModel
                     ListElement { name: "Wind Ensemble";  count: 3; staves: "Flutes, Oboes, Bassoons" }
