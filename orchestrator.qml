@@ -28,7 +28,7 @@ MuseScore {
     description: qsTr("Preset system to quickly orchestrate sketches in MuseScore")
     categoryCode: "composing-arranging-tools"
     thumbnailName: "orchestrator.png"
-    version: "0.2.7b"
+    version: "0.2.7c"
 
     //--------------------------------------------------------------------------------
     // Log Engine
@@ -359,8 +359,33 @@ MuseScore {
         return arr.slice(0)
     }
 
-    function getSelectedStaffArray() {
+    function resolveStableKeyInActiveScore(stableKey) {
+        var key = String(stableKey ?? "")
+        var matches = activeScoreRegistryStaffIdxsForStableKey(key)
 
+        if (!key.length || matches.length === 0) {
+            return {
+                status: "MISSING",
+                stableKey: key
+            }
+        }
+
+        if (matches.length === 1) {
+            return {
+                status: "RESOLVED",
+                stableKey: key,
+                staffIdx: Number(matches[0])
+            }
+        }
+
+        return {
+            status: "DUPLICATE",
+            stableKey: key,
+            candidateStaffIdxs: matches.slice(0)
+        }
+    }
+
+    function getSelectedStaffArray() {
         var out = []
         for (var k in selectedStaff) {
             if (selectedStaff.hasOwnProperty(k) && selectedStaff[k]) out.push(Number(k))
