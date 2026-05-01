@@ -136,6 +136,25 @@ MuseScore {
         return -(i - root.pitchCenterIndex)
     }
 
+    function __instrumentAtTickForStaff(staffIdx, tick) {
+        var p = partForStaff(staffIdx)
+        if (!p)
+            return null
+        var t = Number(tick ?? 0)
+        var inst = null
+        try {
+            if (p.instrumentAtTick)
+                inst = p.instrumentAtTick(t)
+        } catch (e0) {}
+        if (!inst) {
+            try {
+                if (p.instruments && p.instruments.length)
+                    inst = p.instruments[0]
+            } catch (e1) {}
+        }
+        return inst
+    }
+
     function defaultRows() {
         var rows = []
         for (var i = 0; i < 8; ++i)
@@ -415,20 +434,16 @@ MuseScore {
         try {
             var s = String(ocPrefs.presetsJSON || "")
             var parsed = s.length ? JSON.parse(s) : []
-
             if (!parsed || !parsed.length) {
-                parsed = [ newPresetObject(qsTr("New Preset")) ]
+                parsed = []
             }
-
             presets = parsed
-
             __logDebug("ocPrefs presets count: " + presets.length)
             logPrettyPresets("ocPrefs presets:", presets)
         } catch (e) {
             __logDebug("Failed to parse ocPrefs.presetsJSON: " + e)
-            presets = [ newPresetObject(qsTr("New Preset")) ]
+            presets = []
         }
-
         refreshPresetsListModel()
     }
 
@@ -2574,7 +2589,6 @@ MuseScore {
                 // Backing model of all presets (settings-backed)
                 ListModel {
                     id: allPresetsModel
-                    ListElement { name: "Wind Ensemble";  count: 3; staves: "Flutes, Oboes, Bassoons" }
                 }
 
                 onSelectedIndexChanged: {
@@ -2652,8 +2666,8 @@ MuseScore {
                                 rootUI.selectedIndex = -1
                             }
 
-                            // When opening settings, auto-select first card if none selected
-                            if (root.settingsOpen && rootUI && rootUI.selectedIndex < 0) {
+                            // When opening settings, auto-select first card if one exists
+                            if (root.settingsOpen && rootUI && rootUI.selectedIndex < 0 && allPresetsModel.count > 0) {
                                 rootUI.selectedIndex = 0
                                 applyPresetToUI(0)
                             }
@@ -3576,41 +3590,37 @@ MuseScore {
                         TextField {
                             id: presetTitleField
                             anchors.fill: parent
+                            enabled: rootUI.selectedIndex >= 0 && rootUI.selectedIndex < presets.length
                             placeholderText: qsTr("Preset name")
-                            text: qsTr("New Preset")
+                            text: qsTr("")
                             font.bold: true
                             selectByMouse: true
                             width: 200
                             leftPadding: 10
-
                             color: ui.theme.fontPrimaryColor
                             selectionColor: Utils.colorWithAlpha(ui.theme.accentColor, ui.theme.accentOpacityNormal)
                             selectedTextColor: ui.theme.fontPrimaryColor
                             placeholderTextColor: Utils.colorWithAlpha(ui.theme.fontPrimaryColor, 0.3)
-
                             background: Rectangle {
                                 radius: 3
                                 color: ui.theme.textFieldColor
                                 border.width: 1
                                 border.color: presetTitleField.activeFocus ? ui.theme.accentColor : ui.theme.strokeColor
+                                opacity: presetTitleField.enabled ? 1.0 : 0.5
                             }
-
                             Component.onCompleted: {
                                 cursorPosition = 0
                                 deselect()
                             }
-
                             onTextEdited: {
                                 // Debounced autosave while typing
                                 presetNameSaveTimer.restart()
                             }
-
                             onEditingFinished: {
                                 // Flush immediately when focus leaves the field
                                 presetNameSaveTimer.stop()
                                 root.commitPresetNameOnly()
                             }
-
                             onAccepted: {
                                 // Enter pressed: flush immediately
                                 presetNameSaveTimer.stop()
