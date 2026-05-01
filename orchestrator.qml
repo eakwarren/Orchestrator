@@ -123,6 +123,7 @@ MuseScore {
         if (n === 0) return root.pitchCenterIndex
         return root.pitchCenterIndex + (-n)
     }
+
     function pitchIndexToValue(ix) {
         var i = Number(ix)
         if (isNaN(i)) i = root.pitchCenterIndex
@@ -132,6 +133,7 @@ MuseScore {
         if (i === root.pitchCenterIndex) return 0
         return -(i - root.pitchCenterIndex)
     }
+
     function __ensurePresetStaffMeta(presetObj) {
         if (!presetObj.staffMetaByStaffIdx)
             presetObj.staffMetaByStaffIdx = {}
@@ -303,6 +305,7 @@ MuseScore {
         out.sort(function(a,b){return a-b})
         return out
     }
+
     function setSelectedStaffFromArray(arr) {
         clearSelection()
         if (!arr || !arr.length) return
@@ -317,6 +320,7 @@ MuseScore {
             }
         }
     }
+
     function staffNamesFromIndices(arr) {
         if (!arr || !arr.length) return ""
         var names = []
@@ -329,14 +333,20 @@ MuseScore {
         try {
             var s = String(ocPrefs.presetsJSON || "")
             var parsed = s.length ? JSON.parse(s) : []
+
             Log.info(tag, "ocPrefs presets JSON: " + s)
             if (!parsed || !parsed.length) parsed = [ newPresetObject(qsTr("New Preset")) ]
+
             presets = parsed
+
         } catch (e) {
+            Log.debug(tag, "Failed to parse ocPrefs.presetsJSON: " + e)
             presets = [ newPresetObject(qsTr("New Preset")) ]
         }
+
         refreshPresetsListModel()
     }
+
     function savePresetsToSettings() {
         try {
             ocPrefs.presetsJSON = JSON.stringify(presets, null, 2)
@@ -345,6 +355,7 @@ MuseScore {
             Log.error(tag, "Failed to save presets: " + String(e))
         }
     }
+
     function notifyPresetsMutated() {
         // Reassign to a fresh array reference so QML bindings re-evaluate.
         presets = presets.slice(0);
@@ -2342,7 +2353,6 @@ MuseScore {
 
                     Item { Layout.fillWidth: true }
 
-
                     FlatButton {
                         id: cardView
                         icon: root.gridView ? IconCode.SPLIT_VIEW_VERTICAL : IconCode.GRID
@@ -3220,7 +3230,6 @@ MuseScore {
                                     popupView.close();
                                 }
                             }
-
                         }
                     }
                 }
@@ -3408,6 +3417,7 @@ MuseScore {
                             staffList.currentIndex = firstVisibleStaffRowIndex()
                     }
                 }
+
                 Shortcut {
                     id: scShiftUp
                     context: Qt.WindowShortcut
@@ -3423,6 +3433,7 @@ MuseScore {
                         staffList.currentIndex = next
                     }
                 }
+
                 Shortcut {
                     id: scShiftDown
                     context: Qt.WindowShortcut
@@ -3715,6 +3726,7 @@ MuseScore {
                         function isNoteSelected(i) {
                             return !!selectedNotes[i]
                         }
+
                         function setNoteSelected(i, on) {
                             var ns = Object.assign({}, selectedNotes)
                             if (on) ns[i] = true
@@ -3723,16 +3735,19 @@ MuseScore {
                             // Live-commit after this change
                             root.scheduleLiveCommit()
                         }
+
                         function toggleNote(i) {
                             setNoteSelected(i, !isNoteSelected(i))
                             lastAnchorNoteIndex = i
                         }
+
                         function selectSingleNote(i) {
                             clearNoteSelection()
                             setNoteSelected(i, true)
                             lastAnchorNoteIndex = i
                             noteButtonsView.currentIndex = i
                         }
+
                         function selectRangeNote(i) {
                             if (lastAnchorNoteIndex < 0) { selectSingleNote(i); return }
                             var a = Math.min(lastAnchorNoteIndex, i)
@@ -3741,6 +3756,7 @@ MuseScore {
                             for (var r = a; r <= b; ++r) setNoteSelected(r, true)
                             noteButtonsView.currentIndex = i
                         }
+
                         function selectAllNotes() {
                             clearNoteSelection()
                             for (var r = 0; r < noteButtonsModel.count; ++r) setNoteSelected(r, true)
@@ -3782,6 +3798,7 @@ MuseScore {
                             sequences: [ "Meta+A", "Ctrl+A" ]
                             onActivated: selectAllNotes()
                         }
+
                         Shortcut {
                             id: nbShiftUp
                             context: Qt.WindowShortcut
@@ -3794,6 +3811,7 @@ MuseScore {
                                 selectRangeNote(next)
                             }
                         }
+
                         Shortcut {
                             id: nbShiftDown
                             context: Qt.WindowShortcut
@@ -3950,6 +3968,7 @@ MuseScore {
                                         Row {
                                             id: voiceRow
                                             spacing: 0 // Voice button edges touch to avoid unnatural spacing
+
                                             FlatButton {
                                                 id: voice1Btn
                                                 icon: IconCode.VOICE_1
@@ -3958,6 +3977,7 @@ MuseScore {
                                                 transparent: !selected
                                                 onClicked: noteButtonsPane.setVoiceForRow(index, 0)
                                             }
+
                                             FlatButton {
                                                 id: voice2Btn
                                                 icon: IconCode.VOICE_2
@@ -3966,6 +3986,7 @@ MuseScore {
                                                 transparent: !selected
                                                 onClicked: noteButtonsPane.setVoiceForRow(index, 1)
                                             }
+
                                             FlatButton {
                                                 id: voice3Btn
                                                 icon: IconCode.VOICE_3
@@ -3974,6 +3995,7 @@ MuseScore {
                                                 transparent: !selected
                                                 onClicked: noteButtonsPane.setVoiceForRow(index, 2)
                                             }
+
                                             FlatButton {
                                                 id: voice4Btn
                                                 icon: IconCode.VOICE_4
@@ -4014,6 +4036,7 @@ MuseScore {
                                     event.accepted = true
                                     return
                                 }
+
                                 if (event.key === Qt.Key_Down) {
                                     var idx2 = Math.min(noteButtonsModel.count - 1, noteButtonsView.currentIndex + 1)
                                     if (isShift) selectRangeNote(idx2); else selectSingleNote(idx2)
@@ -4035,7 +4058,6 @@ MuseScore {
                                     event.accepted = true
                                 }
                             }
-
                         }
                     }
                 }
