@@ -28,7 +28,7 @@ MuseScore {
     description: qsTr("Preset system to quickly orchestrate sketches in MuseScore")
     categoryCode: "composing-arranging-tools"
     thumbnailName: "orchestrator.png"
-    version: "0.2.7c"
+    version: "0.2.7d"
 
     //--------------------------------------------------------------------------------
     // Log Engine
@@ -290,11 +290,63 @@ MuseScore {
         return {
             id: String(Date.now()) + "-" + Math.random().toString(16).slice(2),
             name: String(name ?? qsTr("New Preset")),
-            staves: [],
-            noteRowsByStaff: {},
-            staffMetaByStaffIdx: {},
+            noteRowsByStableKey: {},
             backgroundColor: ""
         }
+    }
+
+    function presetRowsMap(presetObj) {
+        if (!presetObj || !presetObj.noteRowsByStableKey)
+            return ({})
+        return presetObj.noteRowsByStableKey
+    }
+
+    function presetEntryForStableKey(presetObj, stableKey) {
+        if (!presetObj || !presetObj.noteRowsByStableKey)
+            return null
+        var entry = presetObj.noteRowsByStableKey[String(stableKey)]
+        return entry || null
+    }
+
+    function presetRowsForStableKey(presetObj, stableKey) {
+        var entry = presetEntryForStableKey(presetObj, stableKey)
+        if (!entry || !entry.rows)
+            return []
+        return entry.rows
+    }
+
+    function presetInstLongNameForStableKey(presetObj, stableKey) {
+        var entry = presetEntryForStableKey(presetObj, stableKey)
+        if (!entry)
+            return ""
+        return String(entry.instLongName ?? "")
+    }
+
+    function presetActiveStableKeys(presetObj) {
+        var out = []
+        var map = presetRowsMap(presetObj)
+        for (var stableKey in map) {
+            if (!map.hasOwnProperty(stableKey))
+                continue
+            var rows = presetRowsForStableKey(presetObj, stableKey)
+            if (hasAnyActiveRows(rows))
+                out.push(String(stableKey))
+        }
+        out.sort()
+        return out
+    }
+
+    function presetInstLongNamesFromStableKeys(presetObj, arr) {
+        if (!arr || !arr.length)
+            return ""
+        var names = []
+        for (var i = 0; i < arr.length; ++i) {
+            var nm = presetInstLongNameForStableKey(presetObj, arr[i])
+            if (!nm.length)
+                nm = qsTr("Unknown instrument")
+            names.push(nm)
+        }
+        return names.join(", ")
     }
 
     function clearActiveScoreRegistry() {
@@ -632,20 +684,12 @@ MuseScore {
         return out;
     }
 
-    function __staffIdsWithAnyActive(p) {
-        var ids = [];
-        if (!p || !p.noteRowsByStaff) return ids;
-        for (var sid in p.noteRowsByStaff) {
-            if (!p.noteRowsByStaff.hasOwnProperty(sid)) continue;
-            var rows = p.noteRowsByStaff[sid] || [];
-            if (hasAnyActiveRows(rows)) ids.push(Number(sid));
-        }
-        ids.sort(function(a, b) { return a - b; });
-        return ids;
+    function __stableKeysWithAnyActive(p) {
+        return presetActiveStableKeys(p)
     }
 
     function __presetIsEmpty(p) {
-        return __staffIdsWithAnyActive(p).length === 0;
+        return __stableKeysWithAnyActive(p).length === 0;
     }
 
     function canCopyCurrentPreset() {
@@ -669,34 +713,21 @@ MuseScore {
         if (!uiRef || uiRef.selectedIndex < 0 || uiRef.selectedIndex >= presets.length)
             return;
         var p = presets[uiRef.selectedIndex];
-        if (!p || !p.noteRowsByStaff) return;
-
+        if (!p || !p.noteRowsByStableKey) return;
         var clip = {
-            staves: [],
-            noteRowsByStaff: {},
-            staffMetaByStaffIdx: {}
+            noteRowsByStableKey: {}
         };
-
-        clip.name = String(p.name || "");
+        clip.name = String(p.name ?? "");
         clip.backgroundColor = p.backgroundColor ? colorToHex(p.backgroundColor) : "";
-
-        // Only copy staves that actually have any active rows
-        var ids = __staffIdsWithAnyActive(p);
-        clip.staves = ids.slice(0);
-
-        for (var i = 0; i < ids.length; ++i) {
-            var sid = ids[i];
-            clip.noteRowsByStaff[sid] = __deepCloneRowsArray(p.noteRowsByStaff[sid]);
-
-            if (p.staffMetaByStaffIdx && p.staffMetaByStaffIdx[String(sid)]) {
-                clip.staffMetaByStaffIdx[String(sid)] = {
-                    instrumentId: String(p.staffMetaByStaffIdx[String(sid)].instrumentId || ""),
-                    musicXmlId: String(p.staffMetaByStaffIdx[String(sid)].musicXmlId || "")
-                };
-            }
+        var keys = __stableKeysWithAnyActive(p);
+        for (var i = 0; i < keys.length; ++i) {
+            var stableKey = keys[i];
+            clip.noteRowsByStableKey[stableKey] = {
+                instLongName: presetInstLongNameForStableKey(p, stableKey),
+                rows: __deepCloneRowsArray(presetRowsForStableKey(p, stableKey))
+            };
         }
-
-        presetClipboard = clip;
+        presetClipboard = clip
     }
 
     function pasteClipboardIntoCurrentPreset() {
@@ -711,27 +742,14 @@ MuseScore {
             return;
         }
 
-        if (!p.noteRowsByStaff) p.noteRowsByStaff = {};
-        if (!p.staffMetaByStaffIdx) p.staffMetaByStaffIdx = {};
-
-        // Apply clipboard to the preset (deep clone)
-        p.staves = presetClipboard.staves ? presetClipboard.staves.slice(0) : [];
-
-        if (presetClipboard.noteRowsByStaff) {
-            for (var sidKey in presetClipboard.noteRowsByStaff) {
-                if (!presetClipboard.noteRowsByStaff.hasOwnProperty(sidKey)) continue;
-                var srcRows = presetClipboard.noteRowsByStaff[sidKey] || [];
-                p.noteRowsByStaff[sidKey] = __deepCloneRowsArray(srcRows);
-            }
-        }
-
-        if (presetClipboard.staffMetaByStaffIdx) {
-            for (var metaKey in presetClipboard.staffMetaByStaffIdx) {
-                if (!presetClipboard.staffMetaByStaffIdx.hasOwnProperty(metaKey)) continue;
-                var meta = presetClipboard.staffMetaByStaffIdx[metaKey] || {};
-                p.staffMetaByStaffIdx[metaKey] = {
-                    instrumentId: String(meta.instrumentId || ""),
-                    musicXmlId: String(meta.musicXmlId || "")
+        if (!p.noteRowsByStableKey) p.noteRowsByStableKey = {};
+        if (presetClipboard.noteRowsByStableKey) {
+            for (var stableKey in presetClipboard.noteRowsByStableKey) {
+                if (!presetClipboard.noteRowsByStableKey.hasOwnProperty(stableKey)) continue;
+                var srcEntry = presetClipboard.noteRowsByStableKey[stableKey] || {};
+                p.noteRowsByStableKey[stableKey] = {
+                    instLongName: String(srcEntry.instLongName ?? ""),
+                    rows: __deepCloneRowsArray(srcEntry.rows || [])
                 };
             }
         }
@@ -812,17 +830,18 @@ MuseScore {
                                  // Count UNIQUE active row indices (0..7) across ALL staves
                                  // that have data in noteRowsByStaff (not just p.staves)
                                  var seen = {};
-                                 if (p && p.noteRowsByStaff) {
-                                     for (var sid in p.noteRowsByStaff) {
-                                         if (!p.noteRowsByStaff.hasOwnProperty(sid))
+                                 if (p && p.noteRowsByStableKey) {
+                                     for (var stableKey in p.noteRowsByStableKey) {
+                                         if (!p.noteRowsByStableKey.hasOwnProperty(stableKey))
                                              continue;
-                                         var rows = p.noteRowsByStaff[sid] || [];
+                                         var rows = presetRowsForStableKey(p, stableKey);
                                          for (var i = 0; i < rows.length && i < 8; ++i) {
                                              if (rows[i] && rows[i].active)
                                                  seen[i] = true;
                                          }
                                      }
                                  }
+
                                  var c = 0;
                                  for (var k in seen)
                                      if (seen.hasOwnProperty(k)) c++;
@@ -830,19 +849,10 @@ MuseScore {
                              })(),
 
                              staves: (function () {
-                                 // Display all staves that actually have *active* notes (instrument-only names)
-                                 if (!p || !p.noteRowsByStaff)
+                                 if (!p || !p.noteRowsByStableKey)
                                      return "";
-                                 var ids = [];
-                                 for (var sid in p.noteRowsByStaff) {
-                                     if (!p.noteRowsByStaff.hasOwnProperty(sid))
-                                         continue;
-                                     var rows = p.noteRowsByStaff[sid] || [];
-                                     if (hasAnyActiveRows(rows))
-                                         ids.push(Number(sid));
-                                 }
-                                 ids.sort(function(a,b){ return a-b; });
-                                 return staffInstrumentNamesFromIndices(ids);
+                                 var keys = presetActiveStableKeys(p);
+                                 return presetInstLongNamesFromStableKeys(p, keys);
                              })(),
                          })
         }
@@ -3165,8 +3175,7 @@ MuseScore {
 
                         // (Optional hard sanitize: guarantee the new preset stayed empty)
                         var np = presets[0];
-                        np.noteRowsByStaff = {};
-                        np.staves = [];
+                        np.noteRowsByStableKey = {};
                         notifyPresetsMutated();
                         refreshPresetsListModel();
 
