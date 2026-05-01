@@ -28,7 +28,7 @@ MuseScore {
     description: qsTr("Preset system to quickly orchestrate sketches in MuseScore")
     categoryCode: "composing-arranging-tools"
     thumbnailName: "orchestrator.png"
-    version: "0.2.7d"
+    version: "0.2.7f"
 
     //--------------------------------------------------------------------------------
     // Log Engine
@@ -136,53 +136,6 @@ MuseScore {
         return -(i - root.pitchCenterIndex)
     }
 
-    function __ensurePresetStaffMeta(presetObj) {
-        if (!presetObj.staffMetaByStaffIdx)
-            presetObj.staffMetaByStaffIdx = {}
-        return presetObj.staffMetaByStaffIdx
-    }
-
-    function __instrumentAtTickForStaff(staffIdx, tick) {
-        var p = partForStaff(staffIdx)
-        if (!p)
-            return null
-        var t = Number(tick ?? 0)
-        var inst = null
-        try {
-            if (p.instrumentAtTick)
-                inst = p.instrumentAtTick(t)
-        } catch (e0) {}
-        if (!inst) {
-            try {
-                if (p.instruments && p.instruments.length)
-                    inst = p.instruments[0]
-            } catch (e1) {}
-        }
-        return inst
-    }
-
-    function __instrumentMetaForStaff(staffIdx, tick) {
-        var out = {
-            instrumentId: "",
-            musicXmlId: ""
-        }
-        var inst = __instrumentAtTickForStaff(staffIdx, tick)
-        if (!inst)
-            return out
-        try { out.instrumentId = String(inst.instrumentId ?? "") } catch (e2) {}
-        try { out.musicXmlId = String(inst.musicXmlId ?? "") } catch (e3) {}
-        return out
-    }
-
-
-    function __capturePresetStaffMeta(presetObj, staffIdx, tick) {
-        if (!presetObj || staffIdx === undefined || staffIdx === null || staffIdx < 0)
-            return
-
-        var metaMap = __ensurePresetStaffMeta(presetObj)
-        metaMap[String(staffIdx)] = __instrumentMetaForStaff(staffIdx, tick)
-    }
-
     function defaultRows() {
         var rows = []
         for (var i = 0; i < 8; ++i)
@@ -199,9 +152,12 @@ MuseScore {
     }
 
     function staffHasActiveRowsInPreset(presetObj, staffIdx) {
-        if (!presetObj || !presetObj.noteRowsByStaff)
+        if (!presetObj)
             return false;
-        var rows = presetObj.noteRowsByStaff[staffIdx];
+        var stableKey = stableKeyForStaff(staffIdx, 0);
+        if (!stableKey.length)
+            return false;
+        var rows = presetRowsForStableKey(presetObj, stableKey);
         return hasAnyActiveRows(rows || []);
     }
 
@@ -461,13 +417,6 @@ MuseScore {
         }
     }
 
-    function staffNamesFromIndices(arr) {
-        if (!arr || !arr.length) return ""
-        var names = []
-        for (var i = 0; i < arr.length; ++i) names.push(staffNameByIdx(arr[i]))
-        return names.join(", ")
-    }
-
     // In-memory presets
     function loadPresetsFromSettings() {
         try {
@@ -666,9 +615,8 @@ MuseScore {
     }
 
     // --- Clipboard + helpers ----------------------------------------------------
-
     // Holds a snapshot of a preset's assignments:
-    // { staves: [int...], noteRowsByStaff: { [sid]: [{active, offset, voice} x 8] } }
+    // { noteRowsByStableKey: { [stableKey]: { instLongName, rows: [{active, offset, voice} x 8] } } }
     property var presetClipboard: null
 
     function __deepCloneRowsArray(rows) {
@@ -827,8 +775,8 @@ MuseScore {
             model.append({
                              name: String(p.name || qsTr("New Preset")),
                              count: (function () {
-                                 // Count UNIQUE active row indices (0..7) across ALL staves
-                                 // that have data in noteRowsByStaff (not just p.staves)
+                                 // Count UNIQUE active row indices (0..7) across ALL stableKey entries
+                                 // that have data in noteRowsByStableKey
                                  var seen = {};
                                  if (p && p.noteRowsByStableKey) {
                                      for (var stableKey in p.noteRowsByStableKey) {
@@ -876,54 +824,36 @@ MuseScore {
         // title
         p.name = String((tf && tf.text !== undefined) ? tf.text : p.name)
 
-        // --- IMPORTANT FIX: Never modify staves if no staff is currently focused ---
-        var currentSid = -1;
-        if (orchestratorWin && orchestratorWin.staffListRef && orchestratorWin.staffListRef.currentIndex >= 0)
-            currentSid = staffListModel.get(orchestratorWin.staffListRef.currentIndex).idx;
-
-        // If no staff in the preset is focused, do NOT recompute p.staves.
-        // Prevents deleting the first staff when Save is pressed with no selection.
-        if (currentSid < 0) {
-            return;
-        }
-
-        // staves: include only those with at least one active note (assignment != selection)
-        if (p.noteRowsByStaff) {
-            var ids = [];
-            for (var sIdKey in p.noteRowsByStaff) {
-                if (!p.noteRowsByStaff.hasOwnProperty(sIdKey))
-                    continue;
-                var rows0 = p.noteRowsByStaff[sIdKey] || [];
-                if (hasAnyActiveRows(rows0))
-                    ids.push(Number(sIdKey));
-            }
-            ids.sort(function(a,b){ return a-b; });
-            p.staves = ids;
-        } else {
-            p.staves = [];
-        }
-
-        // per-staff note row storage — update ONLY the currently-focused staff
-        if (!p.noteRowsByStaff)
-            p.noteRowsByStaff = {};
-
+        // Never modify assignments if no staff is currently focused
         var sid = -1;
         if (orchestratorWin && orchestratorWin.staffListRef && orchestratorWin.staffListRef.currentIndex >= 0)
             sid = staffListModel.get(orchestratorWin.staffListRef.currentIndex).idx;
-        else if (p.staves && p.staves.length > 0)
-            sid = p.staves[0]; // fallback
+        if (sid < 0)
+            return;
 
-        if (sid >= 0) {
-            var rows = [];
-            for (var i = 0; i < 8; ++i) {
-                var active = nb ? !!nb.selectedNotes[i] : false;
-                var voice = Number(nb && nb.voiceByRow ? (nb.voiceByRow[i] ?? 0) : 0);
-                var pitchIx = (nb && nb.pitchIndexByRow && nb.pitchIndexByRow[i] !== undefined) ? nb.pitchIndexByRow[i] : root.pitchCenterIndex;
-                var offset = pitchIndexToValue(pitchIx);
-                rows.push({ active: active, offset: offset, voice: voice });
-            }
-            p.noteRowsByStaff[sid] = rows;
-            __capturePresetStaffMeta(p, sid, 0);
+        var stableKey = stableKeyForStaff(sid, 0);
+        if (!stableKey.length)
+            return;
+
+        if (!p.noteRowsByStableKey)
+            p.noteRowsByStableKey = {};
+
+        var rows = [];
+        for (var i = 0; i < 8; ++i) {
+            var active = nb ? !!nb.selectedNotes[i] : false;
+            var voice = Number(nb && nb.voiceByRow ? (nb.voiceByRow[i] ?? 0) : 0);
+            var pitchIx = (nb && nb.pitchIndexByRow && nb.pitchIndexByRow[i] !== undefined) ? nb.pitchIndexByRow[i] : root.pitchCenterIndex;
+            var offset = pitchIndexToValue(pitchIx);
+            rows.push({ active: active, offset: offset, voice: voice });
+        }
+
+        if (hasAnyActiveRows(rows)) {
+            p.noteRowsByStableKey[stableKey] = {
+                instLongName: instLongNameForStaff(sid, 0),
+                rows: rows
+            };
+        } else {
+            try { delete p.noteRowsByStableKey[stableKey]; } catch (e) {}
         }
     }
 
@@ -970,7 +900,6 @@ MuseScore {
     // Commit current UI rows to the current preset for all selected staves
     // (or the focused staff if none are selected). Then notify and refresh the cards.
     function commitNoteRowsToPresetLive() {
-        // New guards: never commit while a new preset is being created, or when live commits are disabled
         if (root.creatingNewPreset || !root.liveCommitEnabled)
             return;
 
@@ -980,12 +909,11 @@ MuseScore {
 
         var p = presets[uiRef.selectedIndex];
         if (!p) return;
-        if (!p.noteRowsByStaff) p.noteRowsByStaff = {};
+        if (!p.noteRowsByStableKey) p.noteRowsByStableKey = {};
 
-        // Targets: all selected staves; if none, use the focused/first staff
+        // Targets: all selected staves; if none, use the focused staff
         var keys = Object.keys(selectedStaff || {});
         var targetIds = [];
-
         if (keys.length > 0) {
             for (var k = 0; k < keys.length; ++k) {
                 var sidNum = parseInt(keys[k], 10);
@@ -995,36 +923,34 @@ MuseScore {
             var sid = -1;
             if (orchestratorWin && orchestratorWin.staffListRef && orchestratorWin.staffListRef.currentIndex >= 0)
                 sid = staffListModel.get(orchestratorWin.staffListRef.currentIndex).idx;
-            // No selected staves and no current focus: do not commit.
             if (sid >= 0) targetIds.push(sid);
             else return;
         }
 
         var rows = collectRowsFromNoteButtons();
-        // Deep copy into each target staff (avoid sharing the same array instance)
-        // Deep copy into each target staff (or remove if no active rows)
+
         for (var t = 0; t < targetIds.length; ++t) {
             var sId = targetIds[t];
+            var stableKey = stableKeyForStaff(sId, 0);
+            if (!stableKey.length)
+                continue;
+
             if (hasAnyActiveRows(rows)) {
                 var cloned = [];
                 for (var i = 0; i < rows.length; ++i)
                     cloned.push({ active: rows[i].active, offset: rows[i].offset, voice: rows[i].voice });
-                p.noteRowsByStaff[sId] = cloned;
-                __capturePresetStaffMeta(p, sId, 0);
+
+                p.noteRowsByStableKey[stableKey] = {
+                    instLongName: instLongNameForStaff(sId, 0),
+                    rows: cloned
+                };
             } else {
-                // No active rows -> remove assignment for this staff
-                try { delete p.noteRowsByStaff[sId]; } catch (e) {}
-                try {
-                    if (p.staffMetaByStaffIdx)
-                        delete p.staffMetaByStaffIdx[String(sId)];
-                } catch (e2) {}
+                try { delete p.noteRowsByStableKey[stableKey]; } catch (e) {}
             }
         }
 
-        // Nudge QML bindings so accent bars and other bindings react immediately
         notifyPresetsMutated();
 
-        // Update the cards list *count* now (preserve current selection)
         var keep = uiRef.selectedIndex;
         refreshPresetsListModel();
         if (orchestratorWin && orchestratorWin.allPresetsModelRef)
@@ -1074,11 +1000,13 @@ MuseScore {
             if (orchestratorWin && orchestratorWin.staffListRef && orchestratorWin.staffListRef.currentIndex >= 0)
                 sid = staffListModel.get(orchestratorWin.staffListRef.currentIndex).idx;
 
-            // Nothing selected -> leave note UI empty and return (pane is hidden by binding anyway)
             if (sid < 0)
                 return;
 
-            var rowsForStaff = (p.noteRowsByStaff && p.noteRowsByStaff[sid]) ? p.noteRowsByStaff[sid] : defaultRows();
+            var stableKey = stableKeyForStaff(sid, 0);
+            var rowsForStaff = stableKey.length ? presetRowsForStableKey(p, stableKey) : [];
+            if (!rowsForStaff || !rowsForStaff.length)
+                rowsForStaff = defaultRows();
 
             var vb = {}, pi = {};
             for (var i = 0; i < 8; ++i) {
@@ -1377,34 +1305,12 @@ MuseScore {
     }
 
     // --- Row labeling & diagnostics (UI / warnings only) ------------------------
-
     function __rowLabel(rowIndex) {
         if (rowIndex === 0) return "T" // Top
         if (rowIndex === 6) return "S" // Second
         if (rowIndex === 7) return "B" // Bottom
         return String(rowIndex)
     }
-
-    function __rowLabelList(rowIndices) {
-        var out = []
-
-        if (!rowIndices || !rowIndices.length)
-            return out
-
-        for (var i = 0; i < rowIndices.length; ++i) {
-            out.push(__rowLabel(rowIndices[i]))
-        }
-
-        return out
-    }
-
-    function __rowLongLabel(rowIndex) {
-        if (rowIndex === 0) return "Top / Single note"
-        if (rowIndex === 6) return "Second note"
-        if (rowIndex === 7) return "Bottom note"
-        return __rowLabel(rowIndex)
-    }
-
     function __recordIgnoredRows(warningSink, staffIdx, tick, noteCount, rowIndices) {
         if (!warningSink || !rowIndices || !rowIndices.length)
             return
@@ -2101,22 +2007,93 @@ MuseScore {
         return false;
     }
 
+    function __resolvedAssignmentsForPresetInActiveScore(presetObj) {
+        var out = {
+            resolvedAssignments: [],
+            missingStableKeys: [],
+            duplicateStableKeys: []
+        };
+        if (!presetObj || !presetObj.noteRowsByStableKey)
+            return out;
+
+        var stableKeys = presetActiveStableKeys(presetObj);
+        for (var i = 0; i < stableKeys.length; ++i) {
+            var stableKey = stableKeys[i];
+            var rows = presetRowsForStableKey(presetObj, stableKey);
+            if (!hasAnyActiveRows(rows))
+                continue;
+
+            var res = resolveStableKeyInActiveScore(stableKey);
+            if (res.status === "RESOLVED") {
+                out.resolvedAssignments.push({
+                                                 stableKey: stableKey,
+                                                 staffIdx: Number(res.staffIdx),
+                                                 rows: __deepCloneRowsArray(rows)
+                                             });
+            } else if (res.status === "MISSING") {
+                out.missingStableKeys.push(stableKey);
+            } else if (res.status === "DUPLICATE") {
+                out.duplicateStableKeys.push(stableKey);
+            }
+        }
+        return out;
+    }
+
+    function __resolvedAssignmentStaffIds(assignments) {
+        var out = [];
+        if (!assignments || !assignments.length)
+            return out;
+        for (var i = 0; i < assignments.length; ++i) {
+            var sid = Number(assignments[i].staffIdx);
+            if (!isNaN(sid) && sid >= 0)
+                out.push(sid);
+        }
+        return out;
+    }
+
+    function __showUnresolvedPresetTargetWarnings(presetObj, targetInfo) {
+        if (!targetInfo)
+            return;
+
+        var lines = [];
+        if (targetInfo.missingStableKeys && targetInfo.missingStableKeys.length) {
+            for (var i = 0; i < targetInfo.missingStableKeys.length; ++i) {
+                var missingKey = targetInfo.missingStableKeys[i];
+                var missingName = presetInstLongNameForStableKey(presetObj, missingKey) || qsTr("Unknown instrument");
+                lines.push(qsTr("Missing destination: %1").arg(missingName));
+            }
+        }
+        if (targetInfo.duplicateStableKeys && targetInfo.duplicateStableKeys.length) {
+            for (var j = 0; j < targetInfo.duplicateStableKeys.length; ++j) {
+                var dupKey = targetInfo.duplicateStableKeys[j];
+                var dupName = presetInstLongNameForStableKey(presetObj, dupKey) || qsTr("Unknown instrument");
+                lines.push(qsTr("Duplicate destination: %1").arg(dupName));
+            }
+        }
+
+        if (!lines.length)
+            return;
+
+        Interactive.info(
+                    qsTr("Some preset destinations were skipped."),
+                    lines.join("\n"),
+                    [qsTr("Ok")]
+                    );
+    }
+
     function firePreset(presetIndex, opts) {
         opts = opts || {}
-
         if (!curScore) {
             __logError("firePreset: no curScore")
             return
         }
-
         if (presetIndex < 0 || presetIndex >= presets.length) {
             __logError("firePreset: invalid preset index " + presetIndex)
             return
         }
-
         var p = presets[presetIndex]
-        if (!p || !p.noteRowsByStaff) {
-            __logWarn("firePreset: preset has no noteRowsByStaff")
+        if (!p || !p.noteRowsByStableKey) {
+            __logWarn("firePreset: preset has no noteRowsByStableKey")
             return
         }
 
@@ -2178,10 +2155,18 @@ MuseScore {
 
         var startTick = (startSeg.tick !== undefined) ? startSeg.tick : 0
         var endTick = (endSeg && endSeg.tick !== undefined) ? endSeg.tick : startTick
-        var targetStaffIds = __staffIdsWithAnyActive(p)
+
+        var targetInfo = __resolvedAssignmentsForPresetInActiveScore(p)
+        var resolvedAssignments = targetInfo.resolvedAssignments || []
+        var targetStaffIds = __resolvedAssignmentStaffIds(resolvedAssignments)
 
         if (!targetStaffIds.length) {
-            __logWarn("firePreset: preset is empty (no active note rows)")
+            __logWarn("firePreset: no resolved destination staves in active score")
+            Interactive.info(
+                        qsTr("No preset destinations matched the active score."),
+                        qsTr("Check instrument names/order in the score and try again."),
+                        [qsTr("Ok")]
+                        )
             return
         }
 
@@ -2192,13 +2177,11 @@ MuseScore {
             if (overwriteStaffIds.length) {
                 var names = staffInstrumentNamesFromIndices(overwriteStaffIds)
                 root.pendingOverwrite = { presetIndex: presetIndex }
-
                 let overwriteBtn = Interactive.question(
                         qsTr("Overwrite notes in destination staves?"),
                         qsTr("There are existing notes in %1.").arg(names),
                         ["Yes", "No"]
                         )
-
                 if (!overwriteBtn || overwriteBtn === "No")
                     return
             }
@@ -2219,11 +2202,10 @@ MuseScore {
             started = true
 
             __doCopy()
-
-            for (var t = 0; t < targetStaffIds.length; ++t) {
-                var staffIdx = targetStaffIds[t]
-                var rows = p.noteRowsByStaff[staffIdx]
-
+            for (var t = 0; t < resolvedAssignments.length; ++t) {
+                var assignment = resolvedAssignments[t]
+                var staffIdx = Number(assignment.staffIdx)
+                var rows = assignment.rows || []
                 if (!rows || !hasAnyActiveRows(rows))
                     continue
 
@@ -2245,7 +2227,6 @@ MuseScore {
 
                 // Highest voice first: 4 -> 3 -> 2 -> 1
                 voices.sort(function(a, b) { return b - a })
-
                 __logInfo(
                             "staffPass staffIdx=" + staffIdx +
                             " track=" + staffBaseTrack(staffIdx) +
@@ -2257,7 +2238,6 @@ MuseScore {
                 for (var vI = 0; vI < voices.length; ++vI) {
                     var voiceIdx = voices[vI]
                     var passPlan = __passPlanForVoice(sourcePlan, voiceIdx)
-
                     if (!passPlan.length) {
                         __logInfo(
                                     "voicePass skipped staffIdx=" + staffIdx +
@@ -2280,7 +2260,6 @@ MuseScore {
                                 passPlan,
                                 voiceIdx
                                 )
-
                     if (!okPass) {
                         throw new Error(
                                     "Voice pass failed staffIdx=" + staffIdx +
@@ -2292,8 +2271,9 @@ MuseScore {
 
             curScore.endCmd()
             committed = true
-
             __showIgnoredRowWarnings(warnings)
+            __showUnresolvedPresetTargetWarnings(p, targetInfo)
+
             if (!__restoreSelection(selectionSnapshot)) {
                 __logWarn("firePreset: could not schedule original selection restore after success")
             }
@@ -4196,11 +4176,10 @@ MuseScore {
                                             // Visible if ANY staff in the selected preset has this note-row active
                                             visible: {
                                                 var p = orchestratorWin && root.presets[rootUI.selectedIndex];
-                                                if (!p || !p.noteRowsByStaff) return false;
-
-                                                for (var sIdKey in p.noteRowsByStaff) {
-                                                    if (!p.noteRowsByStaff.hasOwnProperty(sIdKey)) continue;
-                                                    var rows = p.noteRowsByStaff[sIdKey] || [];
+                                                if (!p || !p.noteRowsByStableKey) return false;
+                                                for (var stableKey in p.noteRowsByStableKey) {
+                                                    if (!p.noteRowsByStableKey.hasOwnProperty(stableKey)) continue;
+                                                    var rows = presetRowsForStableKey(p, stableKey);
                                                     if (index >= 0 && index < rows.length && rows[index] && rows[index].active)
                                                         return true;
                                                 }
