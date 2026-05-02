@@ -28,7 +28,7 @@ MuseScore {
     description: qsTr("Preset system to quickly orchestrate sketches in MuseScore")
     categoryCode: "composing-arranging-tools"
     thumbnailName: "orchestrator.png"
-    version: "0.2.7g"
+    version: "0.2.8"
 
     //--------------------------------------------------------------------------------
     // Log Engine
@@ -111,6 +111,13 @@ MuseScore {
             ocPrefs.lastSettingsOpen = settingsOpen;
             if (ocPrefs.sync) ocPrefs.sync();
         } catch (e) {}
+
+        if (settingsOpen) {
+            buildStaffListModel()
+            refreshStaffActiveRows()
+            refreshPresetsListModel()
+            remapSelectedStaffByStableKey()
+        }
     }
 
     property int pitchOffsetMax: 36
@@ -254,6 +261,8 @@ MuseScore {
         if (!sl)
             return;
 
+        refreshStaffActiveRows()
+
         if (root.usedInstView) {
             pruneSelectionToVisibleStaffRows();
             if (sl.currentIndex >= 0 && !isStaffRowVisible(sl.currentIndex))
@@ -307,7 +316,17 @@ MuseScore {
             if (hasAnyActiveRows(rows))
                 out.push(String(stableKey))
         }
-        out.sort()
+
+        var scoreOrder = activeScoreStableKeyOrder();
+        out.sort(function (a, b) {
+            var ia = scoreOrder.indexOf(a);
+            var ib = scoreOrder.indexOf(b);
+            if (ia === -1 && ib === -1) return a < b ? -1 : 1; // fallback
+            if (ia === -1) return 1;
+            if (ib === -1) return -1;
+            return ia - ib;
+        })
+
         return out
     }
 
@@ -368,7 +387,10 @@ MuseScore {
         }
 
         activeScoreRegistry = registry
-        __logDebug("activeScoreRegistry entries: " + registry.entries.length)
+        __logDebug("activeScoreRegistry " + activeScoreRegistry.entries.length + " entries:");
+        for (var i = 0; i < activeScoreRegistry.entries.length; ++i) {
+            __logDebug(formatRegistryEntryInline(activeScoreRegistry.entries[i], 1));
+        }
         return registry
     }
 
@@ -382,6 +404,11 @@ MuseScore {
     function resolveStableKeyInActiveScore(stableKey) {
         var key = String(stableKey ?? "")
         var matches = activeScoreRegistryStaffIdxsForStableKey(key)
+
+        __logDebug(
+                    "resolveStableKeyInActiveScore key=" + String(stableKey) +
+                    " matches=" + JSON.stringify(activeScoreRegistryStaffIdxsForStableKey(stableKey))
+                    );
 
         if (!key.length || matches.length === 0) {
             return {
@@ -403,6 +430,21 @@ MuseScore {
             stableKey: key,
             candidateStaffIdxs: matches.slice(0)
         }
+    }
+
+    function activeScoreStableKeyOrder() {
+        var order = [];
+        if (!activeScoreRegistry || !activeScoreRegistry.entries) return order;
+
+        var seen = {};
+        for (var i = 0; i < activeScoreRegistry.entries.length; ++i) {
+            var k = activeScoreRegistry.entries[i].stableKey;
+            if (!seen[k]) {
+                seen[k] = true;
+                order.push(k);
+            }
+        }
+        return order;
     }
 
     function getSelectedStaffArray() {
@@ -445,6 +487,7 @@ MuseScore {
             presets = []
         }
         refreshPresetsListModel()
+        refreshStaffActiveRows()
     }
 
     function savePresetsToSettings() {
@@ -481,6 +524,19 @@ MuseScore {
         if (line.indexOf(pad) === 0)
             return line.slice(pad.length)
         return line
+    }
+
+    function formatRegistryEntryInline(e, indentLevel) {
+        var pad = indentForLog(indentLevel ?? 0);
+        if (!e) return pad + "{}";
+
+        return pad + "{"
+                + "stableKey: " + String(e.stableKey)
+                + ", musicXmlId: " + String(e.musicXmlId)
+                + ", normalizedInstLongName: " + String(e.normalizedInstLongName)
+                + ", staffOffsetWithinInst: " + Number(e.staffOffsetWithinInst)
+                + ", staffIdx: " + Number(e.staffIdx)
+                + "}";
     }
 
     function formatInlineForLog(value) {
@@ -533,6 +589,15 @@ MuseScore {
         }
 
         return String(value)
+    }
+
+    function logMultilineDebug(prefix, text) {
+        if (prefix)
+            __logDebug(prefix);
+        var lines = String(text || "").split("\n");
+        for (var i = 0; i < lines.length; ++i) {
+            __logDebug(lines[i]);
+        }
     }
 
     function formatForLog(value, indent) {
@@ -740,6 +805,7 @@ MuseScore {
         notifyPresetsMutated();
         refreshPresetsListModel();
         savePresetsToSettings();
+        refreshStaffActiveRows();
     }
 
     function colorToHex(c) {
@@ -824,6 +890,17 @@ MuseScore {
             if (!(storedSel >= 0)) {
                 uiRef.selectedIndex = 0;
             }
+        }
+    }
+
+    function refreshStaffActiveRows() {
+        for (var i = 0; i < staffListModel.count; ++i) {
+            var staffIdx = staffListModel.get(i).idx
+            staffListModel.setProperty(
+                        i,
+                        "hasActiveRows",
+                        staffHasActiveRowsInCurrentPreset(staffIdx)
+                        )
         }
     }
 
@@ -963,9 +1040,11 @@ MuseScore {
         }
 
         notifyPresetsMutated();
+        refreshStaffActiveRows();
 
         var keep = uiRef.selectedIndex;
         refreshPresetsListModel();
+        refreshStaffActiveRows();
         if (orchestratorWin && orchestratorWin.allPresetsModelRef)
             uiRef.selectedIndex = Math.min(keep, Math.max(0, orchestratorWin.allPresetsModelRef.count - 1));
     }
@@ -1048,6 +1127,7 @@ MuseScore {
         notifyPresetsMutated();
         savePresetsToSettings();
         refreshPresetsListModel();
+        refreshStaffActiveRows();
 
         var uiRef = orchestratorWin ? orchestratorWin.rootUIRef : null;
         var tf   = orchestratorWin ? orchestratorWin.presetTitleFieldRef : null;
@@ -1083,10 +1163,12 @@ MuseScore {
 
         updatePresetFromUI(sel)
         notifyPresetsMutated()
+        refreshStaffActiveRows()
         savePresetsToSettings()
 
         var keep = uiRef ? uiRef.selectedIndex : -1
         refreshPresetsListModel()
+        refreshStaffActiveRows();
         if (uiRef && model)
             uiRef.selectedIndex = Math.min(keep, Math.max(0, model.count - 1))
     }
@@ -1111,6 +1193,7 @@ MuseScore {
         // Make bindings and cards refresh immediately
         notifyPresetsMutated()
         refreshPresetsListModel()
+        refreshStaffActiveRows()
 
         // Persist
         savePresetsToSettings()
@@ -1189,6 +1272,23 @@ MuseScore {
         return mx + "|" + nm + "|" + off
     }
 
+    function remapSelectedStaffByStableKey() {
+        var newSelected = ({})
+        for (var k in selectedStaff) {
+            if (!selectedStaff.hasOwnProperty(k)) continue
+            var oldStaffIdx = Number(k)
+            var stableKey = stableKeyForStaff(oldStaffIdx, 0)
+            if (!stableKey) continue
+
+            var matches = activeScoreRegistryStaffIdxsForStableKey(stableKey)
+            if (matches.length === 1) {
+                newSelected[matches[0]] = true
+            }
+        }
+        selectedStaff = newSelected
+        bumpSelection()
+    }
+
     function nameForPart(p, tick) {
         if (!p) return ''
         var nm = (p.longName && p.longName.length) ? p.longName
@@ -1232,7 +1332,7 @@ MuseScore {
                 for (var sOff = 0; sOff < numStaves; ++sOff) {
                     var staffIdx = baseStaff + sOff
                     var display = cleanPart + ': ' + qsTr('Staff %1').arg(sOff + 1)
-                    staffListModel.append({ idx: staffIdx, name: display })
+                    staffListModel.append({ idx: staffIdx, name: display, hasActiveRows: false })
                 }
             }
         }
@@ -1327,11 +1427,20 @@ MuseScore {
     function __recordIgnoredRows(warningSink, staffIdx, tick, noteCount, rowIndices) {
         if (!warningSink || !rowIndices || !rowIndices.length)
             return
+        var sig = staffIdx + ":" + tick + ":" + noteCount + ":" + rows.join(",")
+
+        if (!warningSink._seen)
+            warningSink._seen = {}
+
+        if (warningSink._seen[sig])
+            return
+
+        warningSink._seen[sig] = true
         warningSink.push({
-                             staffIdx: Number(staffIdx),
-                             tick: Number(tick || 0),
-                             noteCount: Number(noteCount || 0),
-                             rows: rowIndices.slice(0)
+                             staffIdx,
+                             tick,
+                             noteCount,
+                             rows: rows.slice(0)
                          })
     }
 
@@ -2149,6 +2258,8 @@ MuseScore {
         var startTick = (startSeg.tick !== undefined) ? startSeg.tick : 0
         var endTick = (endSeg && endSeg.tick !== undefined) ? endSeg.tick : startTick
 
+        rebuildActiveScoreRegistry(startTick)
+
         var targetInfo = __resolvedAssignmentsForPresetInActiveScore(p)
         var resolvedAssignments = targetInfo.resolvedAssignments || []
         var targetStaffIds = __resolvedAssignmentStaffIds(resolvedAssignments)
@@ -2437,6 +2548,8 @@ MuseScore {
 
             __logDebug("Post-show visible: " + orchestratorWin.visible + " visibility: " + orchestratorWin.visibility)
             buildStaffListModel()
+            refreshStaffActiveRows()
+            refreshPresetsListModel()
 
             // Load presets (Settings-backed) and apply the first preset to the UI
             loadPresetsFromSettings()
@@ -2604,6 +2717,8 @@ MuseScore {
                     {
                         applyPresetToUI(selectedIndex);
                     }
+
+                    refreshStaffActiveRows()
 
                     // Persist selection (unchanged)
                     try {
@@ -3127,6 +3242,7 @@ MuseScore {
                         var p = newPresetObject(qsTr("New Preset"));
                         presets.unshift(p);
                         refreshPresetsListModel();
+                        refreshStaffActiveRows();
                         presetFlick.contentY = 0;
 
                         // --- 2) Clear ALL selection state in the UI ---
@@ -3150,6 +3266,7 @@ MuseScore {
                         np.noteRowsByStableKey = {};
                         notifyPresetsMutated();
                         refreshPresetsListModel();
+                        refreshStaffActiveRows();
 
                         // Restore commit policy now (but keep the creation guard ON one more tick)
                         root.suppressApplyPreset = false;
@@ -3178,6 +3295,7 @@ MuseScore {
                         // Mirror move in presets[]
                         var tmp = presets[i - 1]; presets[i - 1] = presets[i]; presets[i] = tmp
                         notifyPresetsMutated()
+                        refreshStaffActiveRows()
                         rootUI.selectedIndex = i - 1
                         settingsTools.scrollCardIntoView(i - 1)
                         savePresetsToSettings()
@@ -3223,6 +3341,7 @@ MuseScore {
                         //         notifyPresetsMutated();
                         //         savePresetsToSettings();
                         //         refreshPresetsListModel();
+                        //         refreshStaffActiveRows();
                         //     }
                         //     dlg.close();
                         //     dlg.destroy();
@@ -3262,6 +3381,7 @@ MuseScore {
                                         // Force QML bindings to re-evaluate for the current card
                                         notifyPresetsMutated();
                                         refreshPresetsListModel();
+                                        refreshStaffActiveRows();
 
                                         // Nudge selection to force delegate refresh (handles first-preset case)
                                         var uiRef2 = orchestratorWin ? orchestratorWin.rootUIRef : null;
@@ -3297,6 +3417,7 @@ MuseScore {
                                         // Force QML bindings to re-evaluate for the current card
                                         notifyPresetsMutated();
                                         refreshPresetsListModel();
+                                        refreshStaffActiveRows();
 
                                         // Nudge selection to force delegate refresh (handles first-preset case)
                                         var uiRef2 = orchestratorWin ? orchestratorWin.rootUIRef : null;
@@ -3332,6 +3453,7 @@ MuseScore {
                                         // Force QML bindings to re-evaluate for the current card
                                         notifyPresetsMutated();
                                         refreshPresetsListModel();
+                                        refreshStaffActiveRows();
 
                                         // Nudge selection to force delegate refresh (handles first-preset case)
                                         var uiRef2 = orchestratorWin ? orchestratorWin.rootUIRef : null;
@@ -3367,6 +3489,7 @@ MuseScore {
                                         // Force QML bindings to re-evaluate for the current card
                                         notifyPresetsMutated();
                                         refreshPresetsListModel();
+                                        refreshStaffActiveRows();
 
                                         // Nudge selection to force delegate refresh (handles first-preset case)
                                         var uiRef2 = orchestratorWin ? orchestratorWin.rootUIRef : null;
@@ -3402,6 +3525,7 @@ MuseScore {
                                         // Force QML bindings to re-evaluate for the current card
                                         notifyPresetsMutated();
                                         refreshPresetsListModel();
+                                        refreshStaffActiveRows();
 
                                         // Nudge selection to force delegate refresh (handles first-preset case)
                                         var uiRef2 = orchestratorWin ? orchestratorWin.rootUIRef : null;
@@ -3437,6 +3561,7 @@ MuseScore {
                                         // Force QML bindings to re-evaluate for the current card
                                         notifyPresetsMutated();
                                         refreshPresetsListModel();
+                                        refreshStaffActiveRows();
 
                                         // Nudge selection to force delegate refresh (handles first-preset case)
                                         var uiRef2 = orchestratorWin ? orchestratorWin.rootUIRef : null;
@@ -3472,6 +3597,7 @@ MuseScore {
                                         // Force QML bindings to re-evaluate for the current card
                                         notifyPresetsMutated();
                                         refreshPresetsListModel();
+                                        refreshStaffActiveRows();
 
                                         // Nudge selection to force delegate refresh (handles first-preset case)
                                         var uiRef2 = orchestratorWin ? orchestratorWin.rootUIRef : null;
@@ -3515,6 +3641,7 @@ MuseScore {
                                         notifyPresetsMutated();
                                         savePresetsToSettings();
                                         refreshPresetsListModel();
+                                        refreshStaffActiveRows();
                                     }
                                     popupView.close();
                                 }
@@ -3777,7 +3904,7 @@ MuseScore {
                                 spacing: root.usedInstView ? 0 : 8
                                 delegate: Item {
                                     id: rowShell
-                                    property bool hasActiveRows: root.staffHasActiveRowsInCurrentPreset(model.idx)
+                                    property bool hasActiveRows: model.hasActiveRows
                                     property bool rowVisible: !root.usedInstView || hasActiveRows
 
                                     visible: rowVisible
