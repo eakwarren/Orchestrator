@@ -4059,7 +4059,7 @@ MuseScore {
                                             z: 10
 
                                             FlatButton {
-                                                id: hovTooltip
+                                                id: instStripTooltip
                                                 toolTipTitle: rowShell.isDuplicateTarget ? qsTr("Duplicate instrument") : qsTr("Assigned instrument")
                                                 transparent: true
                                                 onClicked: {}
@@ -4428,6 +4428,15 @@ MuseScore {
                                                 return false;
                                             }
                                             z: 1
+
+                                            FlatButton {
+                                                id: noteStripTooltip
+                                                toolTipTitle: qsTr("Assigned note")
+                                                transparent: true
+                                                onClicked: {}
+                                                width: parent.width
+                                                height: parent.height
+                                            }
                                         }
 
                                         onClicked: function (mouse) {
