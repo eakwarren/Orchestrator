@@ -59,6 +59,7 @@ MuseScore {
     property bool settingsOpen: false
     property bool gridView: false
     property bool usedInstView: false
+    property var duplicateStaffMap: ({})
     property var orchestratorWin: null
     property var selectedStaff: ({})
     property int selectedCountProp: 0
@@ -117,6 +118,9 @@ MuseScore {
             refreshStaffActiveRows()
             refreshPresetsListModel()
             remapSelectedStaffByStableKey()
+            refreshDuplicateStaffMap()
+        } else {
+            duplicateStaffMap = ({})
         }
     }
 
@@ -261,6 +265,7 @@ MuseScore {
         if (!sl)
             return;
 
+        refreshDuplicateStaffMap()
         refreshStaffActiveRows()
 
         if (root.usedInstView) {
@@ -447,6 +452,36 @@ MuseScore {
         return order;
     }
 
+    function duplicateStaffIdxsForPreset(presetObj) {
+        var out = {}
+
+        if (!presetObj || !presetObj.noteRowsByStableKey)
+            return out
+
+        var info = __resolvedAssignmentsForPresetInActiveScore(presetObj)
+
+        if (!info || !info.duplicateStableKeys)
+            return out
+
+        for (var i = 0; i < info.duplicateStableKeys.length; ++i) {
+            var d = info.duplicateStableKeys[i]
+            for (var j = 0; j < d.staffIdxs.length; ++j) {
+                out[d.staffIdxs[j]] = true
+            }
+        }
+
+        return out
+    }
+
+    function refreshDuplicateStaffMap() {
+        var uiRef = orchestratorWin ? orchestratorWin.rootUIRef : null
+        if (!root.settingsOpen || !uiRef || uiRef.selectedIndex < 0 || uiRef.selectedIndex >= presets.length) {
+            duplicateStaffMap = ({})
+            return
+        }
+        duplicateStaffMap = duplicateStaffIdxsForPreset(presets[uiRef.selectedIndex])
+    }
+
     function getSelectedStaffArray() {
         var out = []
         for (var k in selectedStaff) {
@@ -454,6 +489,27 @@ MuseScore {
         }
         out.sort(function(a,b){return a-b})
         return out
+    }
+
+    function showDuplicateStableKeyModal(dupes) {
+        var lines = []
+
+        for (var i = 0; i < dupes.length; ++i) {
+            var d = dupes[i]
+            var staffNames = []
+            for (var j = 0; j < d.staffIdxs.length; ++j) {
+                staffNames.push(qsTr("Staff %1").arg(d.staffIdxs[j] + 1))
+            }
+            lines.push(d.instName + ": " + staffNames.join(", "))
+        }
+
+        Interactive.info(
+                    qsTr("Duplicate instruments detected."),
+                    qsTr("A target instrument occurs multiple times in the score.\n") +
+                    qsTr("Remove the duplicate or change its name.\n\n") +
+                    lines.join("\n"),
+                    [qsTr("OK")]
+                    )
     }
 
     function setSelectedStaffFromArray(arr) {
@@ -2110,35 +2166,78 @@ MuseScore {
     }
 
     function __resolvedAssignmentsForPresetInActiveScore(presetObj) {
-        var out = {
-            resolvedAssignments: [],
-            missingStableKeys: [],
-            duplicateStableKeys: []
-        };
-        if (!presetObj || !presetObj.noteRowsByStableKey)
-            return out;
+        var resolvedAssignments = []
+        var duplicateStableKeys = []
+        var missingStableKeys = []
 
-        var stableKeys = presetActiveStableKeys(presetObj);
-        for (var i = 0; i < stableKeys.length; ++i) {
-            var stableKey = stableKeys[i];
-            var rows = presetRowsForStableKey(presetObj, stableKey);
-            if (!hasAnyActiveRows(rows))
-                continue;
-
-            var res = resolveStableKeyInActiveScore(stableKey);
-            if (res.status === "RESOLVED") {
-                out.resolvedAssignments.push({
-                                                 stableKey: stableKey,
-                                                 staffIdx: Number(res.staffIdx),
-                                                 rows: __deepCloneRowsArray(rows)
-                                             });
-            } else if (res.status === "MISSING") {
-                out.missingStableKeys.push(stableKey);
-            } else if (res.status === "DUPLICATE") {
-                out.duplicateStableKeys.push(stableKey);
+        if (!presetObj || !presetObj.noteRowsByStableKey) {
+            return {
+                resolvedAssignments: []
             }
         }
-        return out;
+
+        // Collect active stableKeys from the preset
+        var stableKeys = presetActiveStableKeys(presetObj)
+        if (!stableKeys || !stableKeys.length) {
+            return {
+                resolvedAssignments: []
+            }
+        }
+
+        // Ensure registry exists and is current
+        if (!activeScoreRegistry || !activeScoreRegistry.byStableKey) {
+            return {
+                resolvedAssignments: []
+            }
+        }
+
+        // Resolve each stableKey against the active score
+        for (var i = 0; i < stableKeys.length; ++i) {
+            var stableKey = stableKeys[i];
+            var res = resolveStableKeyInActiveScore(stableKey)
+
+            // Case 1: duplicate instruments (1 stableKey → many staves)
+            if (res.status === "DUPLICATE") {
+                duplicateStableKeys.push({
+                                             stableKey: stableKey,
+                                             instName: presetInstLongNameForStableKey(presetObj, stableKey),
+                                             staffIdxs: res.candidateStaffIdxs.slice(0)
+                                         })
+                continue
+            }
+
+            // Case 2: missing instrument (preset refers to something not in score)
+            if (res.status === "MISSING") {
+                missingStableKeys.push({
+                                           stableKey: stableKey,
+                                           instName: presetInstLongNameForStableKey(presetObj, stableKey)
+                                       })
+                continue
+            }
+
+            // Case 3: exactly one match → valid assignment
+            if (res.status === "RESOLVED") {
+                resolvedAssignments.push({
+                                             status: res.status,
+                                             stableKey: res.stableKey,
+                                             staffIdx: res.staffIdx,
+                                             rows: presetRowsForStableKey(presetObj, stableKey)
+                                         })
+            }
+        }
+
+        // Hard stop: duplicate instruments must be resolved by the user
+        if (duplicateStableKeys.length > 0) {
+            return {
+                duplicateStableKeys: duplicateStableKeys
+            }
+        }
+
+        // Normal successful resolution
+        return {
+            resolvedAssignments: resolvedAssignments,
+            missingStableKeys: missingStableKeys
+        }
     }
 
     function __resolvedAssignmentStaffIds(assignments) {
@@ -2261,6 +2360,12 @@ MuseScore {
         rebuildActiveScoreRegistry(startTick)
 
         var targetInfo = __resolvedAssignmentsForPresetInActiveScore(p)
+
+        if (targetInfo.duplicateStableKeys) {
+            showDuplicateStableKeyModal(targetInfo.duplicateStableKeys)
+            return
+        }
+
         var resolvedAssignments = targetInfo.resolvedAssignments || []
         var targetStaffIds = __resolvedAssignmentStaffIds(resolvedAssignments)
 
@@ -2718,9 +2823,15 @@ MuseScore {
                         applyPresetToUI(selectedIndex);
                     }
 
+                    if (root.settingsOpen && selectedIndex >= 0 && selectedIndex < presets.length) {
+                        duplicateStaffMap = duplicateStaffIdxsForPreset(presets[selectedIndex])
+                    } else {
+                        duplicateStaffMap = ({})
+                    }
+
+                    refreshDuplicateStaffMap()
                     refreshStaffActiveRows()
 
-                    // Persist selection (unchanged)
                     try {
                         ocPrefs.lastSelectedIndex = root.settingsOpen
                                 ? Math.max(-1, Math.min(selectedIndex, allPresetsModel.count - 1))
@@ -3907,6 +4018,12 @@ MuseScore {
                                     property bool hasActiveRows: model.hasActiveRows
                                     property bool rowVisible: !root.usedInstView || hasActiveRows
 
+                                    property bool isDuplicateTarget: (
+                                                                         root.settingsOpen &&
+                                                                         !!root.duplicateStaffMap &&
+                                                                         !!root.duplicateStaffMap[model.idx]
+                                                                         )
+
                                     visible: rowVisible
                                     width: ListView.view.width
                                     height: rowVisible ? (root.usedInstView ? 38 : 30) : 0
@@ -3936,9 +4053,19 @@ MuseScore {
                                             }
                                             width: 3
                                             radius: 1
-                                            color: ui.theme.accentColor
-                                            visible: rowShell.hasActiveRows
+                                            color: rowShell.isDuplicateTarget ? "#FF0000" : ui.theme.accentColor
+                                            visible: rowShell.hasActiveRows || rowShell.isDuplicateTarget
+
                                             z: 10
+
+                                            FlatButton {
+                                                id: hovTooltip
+                                                toolTipTitle: rowShell.isDuplicateTarget ? qsTr("Duplicate instrument") : qsTr("Assigned instrument")
+                                                transparent: true
+                                                onClicked: {}
+                                                width: parent.width
+                                                height: parent.height
+                                            }
                                         }
 
                                         contentItem: Text {
