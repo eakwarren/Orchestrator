@@ -4062,6 +4062,7 @@ MuseScore {
                                                 id: instStripTooltip
                                                 toolTipTitle: rowShell.isDuplicateTarget ? qsTr("Duplicate instrument") : qsTr("Assigned instrument")
                                                 transparent: true
+                                                hoverHitColor: "transparent"
                                                 onClicked: {}
                                                 width: parent.width
                                                 height: parent.height
@@ -4433,6 +4434,7 @@ MuseScore {
                                                 id: noteStripTooltip
                                                 toolTipTitle: qsTr("Assigned note")
                                                 transparent: true
+                                                hoverHitColor: "transparent"
                                                 onClicked: {}
                                                 width: parent.width
                                                 height: parent.height
