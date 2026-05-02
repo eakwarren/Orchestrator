@@ -27,6 +27,11 @@ Developed with ❤️ by Eric Warren
 
    <img width="902" height="516" alt="orchestrator_settings" src="https://github.com/user-attachments/assets/7869e22f-a16b-4924-a0f2-799e8fbe95db" />
 
+   Orchestrator presets stay attached to the same score instruments even if you reorder the score. If you rename, replace, split, merge, or remove instruments, unresolved mappings will be skipped. Duplicate instruments are marked with a red sidebar.
+
+   <img width="286" height="122" alt="duplicate_icons" src="https://github.com/user-attachments/assets/ac479394-94b0-4fcd-b10d-e75ece37d7f0" />
+
+   
 > [!TIP]
 > Select multiple instruments with Cmd/Ctrl+click to quickly assign them to the same note. Also, click the triangle button to the right of the preset name to toggle a compact view of only the instruments used by the preset.
 
@@ -49,10 +54,9 @@ Developed with ❤️ by Eric Warren
 
 
 ## Known Issues
-Currently, a design constraint is that presets operations are based on an instrument's staff index. So presets made for one score layout, won’t necessarily translate to a different score layout. For example, presets made for the Classical Orchestra template won’t completely translate to the Symphony Orchestra template. The instruments, their order, and number of staves, don’t match. I'm working on a design that uses semi-unique identifiers based on `musicXmlId|normalizedstaffname|staffindex` that will map across score layouts.
 
 > [!CAUTION]
-> Changing voices or selecting multiple voices in an instrument sometimes produces wrong results or crashes MuseScore. It's a work-in-progress. For now, I recommend leaving all settings on the default Voice 1.
+> Changing voices or selecting multiple voices in an instrument sometimes produces wrong results or crashes MuseScore. I'll investigate more once MuseScore 4.7 is released.  For now, I recommend leaving all presets on the default Voice 1.
 
 View known issues on [GitHub](https://github.com/eakwarren/Orchestrator/issues)
 
