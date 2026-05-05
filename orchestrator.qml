@@ -2620,7 +2620,7 @@ MuseScore {
             __logWarn("firePreset: no resolved destination staves in active score")
             Interactive.info(
                         qsTr("No preset destinations matched the active score."),
-                        qsTr("Check instrument names/order in the score and try again."),
+                        qsTr("Check instrument names in the score and try again.\nTip: Check expected names in the preset card."),
                         [qsTr("Ok")]
                         )
             return
