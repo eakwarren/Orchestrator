@@ -67,7 +67,6 @@ MuseScore {
     property int lastAnchorIndex: -1
     property int currentStaffIdx: -1
     property bool liveCommitEnabled: true
-    property var pendingOverwrite: null
 
     // Theme
     property bool isDarkTheme: (function () {
@@ -2645,7 +2644,6 @@ MuseScore {
             var overwriteStaffIds = __detectOverwriteStaffIds(targetStaffIds, startTick, endTick)
             if (overwriteStaffIds.length) {
                 var names = staffInstrumentNamesFromIndices(overwriteStaffIds)
-                root.pendingOverwrite = { presetIndex: presetIndex }
                 let overwriteBtn = Interactive.question(
                         qsTr("Overwrite notes in destination staves?"),
                         qsTr("There are existing notes in %1.").arg(names),
