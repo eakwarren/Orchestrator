@@ -13,6 +13,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
+import FileIO 3.0
 import MuseApi.Interactive 1.0
 import MuseApi.Log 1.0
 import Muse.Ui
@@ -28,7 +29,7 @@ MuseScore {
     description: qsTr("Preset system to quickly orchestrate sketches in MuseScore")
     categoryCode: "composing-arranging-tools"
     thumbnailName: "orchestrator.png"
-    version: "0.2.8"
+    version: "0.2.9"
 
     //--------------------------------------------------------------------------------
     // Log Engine
@@ -87,6 +88,13 @@ MuseScore {
         property int  lastSelectedIndex: -1
         property int  lastWindowX: 0
         property int  lastWindowY: 0
+    }
+
+    FileIO {
+        id: presetCollectionFile
+        onError: function(msg) {
+            root.__logError("Preset collection file error: " + String(msg))
+        }
     }
 
     // In-memory presets array
@@ -552,6 +560,257 @@ MuseScore {
             if (ocPrefs.sync) { try { ocPrefs.sync() } catch (e2) {} }
         } catch (e) {
             __logError("Failed to save presets: " + String(e))
+        }
+    }
+
+    function presetCollectionFileUrlToLocalPath(fileUrl) {
+        var s = String(fileUrl === undefined || fileUrl === null ? "" : fileUrl)
+        if (!s.length)
+            return ""
+        try {
+            s = decodeURIComponent(s)
+        } catch (e) {}
+        s = s.replace(/^file:\/\/\/([A-Za-z]:\/.*)$/, "$1")
+        s = s.replace(/^file:\/\//, "")
+        return s
+    }
+
+    function normalizePresetCollectionSavePath(localPath) {
+        var path = String(localPath ?? "").trim()
+        if (!path.length)
+            return ""
+        if (/\.json$/i.test(path))
+            return path
+        return path + ".json"
+    }
+
+    function clonePresetRowsMapForCollection(noteRowsByStableKey) {
+        var out = {}
+        if (!noteRowsByStableKey)
+            return out
+        for (var stableKey in noteRowsByStableKey) {
+            if (!noteRowsByStableKey.hasOwnProperty(stableKey))
+                continue
+            var srcEntry = noteRowsByStableKey[stableKey]
+            if (!srcEntry)
+                continue
+            out[String(stableKey)] = {
+                instLongName: String(srcEntry.instLongName ?? ""),
+                rows: __deepCloneRowsArray(srcEntry.rows || [])
+            }
+        }
+        return out
+    }
+
+    function sanitizePresetForCollection(rawPreset) {
+        var raw = rawPreset || {}
+        var sanitizedId = String(raw.id ?? "").trim()
+        if (!sanitizedId.length)
+            return null
+        return {
+            id: sanitizedId,
+            name: String(raw.name ?? qsTr("New Preset")),
+            backgroundColor: String(raw.backgroundColor ?? ""),
+            noteRowsByStableKey: clonePresetRowsMapForCollection(raw.noteRowsByStableKey || {})
+        }
+    }
+
+    function buildPresetCollectionDocument() {
+        var doc = {
+            schema: "orchestrator-preset-collection",
+            schemaVersion: 1,
+            pluginName: String(root.title),
+            pluginVersion: String(root.version),
+            presets: []
+        }
+        for (var i = 0; i < presets.length; ++i) {
+            var sanitized = sanitizePresetForCollection(presets[i])
+            if (sanitized)
+                doc.presets.push(sanitized)
+        }
+        return doc
+    }
+
+    function parsePresetCollectionText(text) {
+        var raw = JSON.parse(String(text ?? ""))
+        if (Array.isArray(raw)) {
+            return {
+                schema: "orchestrator-preset-collection",
+                schemaVersion: 1,
+                presets: raw
+            }
+        }
+        if (!raw || typeof raw !== "object" || !Array.isArray(raw.presets)) {
+            throw new Error("Preset collection file does not contain a presets array.")
+        }
+        return raw
+    }
+
+    function mergePresetCollectionDocument(doc, sourcePath) {
+        var existingIds = {}
+        for (var i = 0; i < presets.length; ++i) {
+            var existingId = String((presets[i] && presets[i].id) ?? "").trim()
+            if (existingId.length)
+                existingIds[existingId] = true
+        }
+
+        var incoming = (doc && Array.isArray(doc.presets)) ? doc.presets : []
+        var added = 0
+        var skipped = 0
+        var invalid = 0
+
+        for (var j = 0; j < incoming.length; ++j) {
+            var sanitized = sanitizePresetForCollection(incoming[j])
+            if (!sanitized) {
+                invalid += 1
+                continue
+            }
+            if (existingIds[sanitized.id]) {
+                skipped += 1
+                continue
+            }
+            presets.push(sanitized)
+            existingIds[sanitized.id] = true
+            added += 1
+        }
+
+        notifyPresetsMutated()
+        refreshPresetsListModel()
+        refreshStaffActiveRows()
+        savePresetsToSettings()
+
+        try {
+            ocPrefs.lastPresetCollectionPath = String(sourcePath ?? "")
+            if (ocPrefs.sync) ocPrefs.sync()
+        } catch (e0) {}
+
+        Interactive.info(
+                    qsTr("Preset file loaded."),
+                    qsTr("Total presets in file: %1\nAdded: %2\nSkipped (duplicate IDs): %3\nInvalid: %4")
+                    .arg(incoming.length)
+                    .arg(added)
+                    .arg(skipped)
+                    .arg(invalid)
+                    )
+
+        return {
+            total: incoming.length,
+            added: added,
+            skipped: skipped,
+            invalid: invalid
+        }
+    }
+
+    function loadPresetCollectionFromPath(localPath) {
+        __logInfo("loadPresetCollectionFromPath entry localPath=" + String(localPath))
+        var path = String(localPath ?? "").trim()
+        if (!path.length)
+            return false
+
+        presetCollectionFile.source = path
+
+        var text = ""
+        try {
+            text = presetCollectionFile.read()
+        } catch (e1) {
+            __logError("Load preset collection read failed: " + String(e1))
+            Interactive.error(
+                        qsTr("Preset file load failed."),
+                        qsTr("The file could not be read.\n%1").arg(path)
+                        )
+            return false
+        }
+
+        try {
+            var doc = parsePresetCollectionText(text)
+            mergePresetCollectionDocument(doc, path)
+            return true
+        } catch (e2) {
+            __logError("Load preset collection parse/merge failed: " + String(e2))
+            Interactive.error(
+                        qsTr("Preset file load failed."),
+                        qsTr("The file is not a valid preset collection.\n%1").arg(String(e2))
+                        )
+            return false
+        }
+    }
+
+    function savePresetCollectionToPath(localPath) {
+        __logInfo("savePresetCollectionToPath entry localPath=" + String(localPath))
+        var path = normalizePresetCollectionSavePath(localPath)
+        if (!path.length)
+            return false
+        var doc = buildPresetCollectionDocument()
+        var text = JSON.stringify(doc, null, 2)
+        presetCollectionFile.source = path
+        var ok = false
+        try {
+            ok = !!presetCollectionFile.write(text)
+        } catch (e3) {
+            ok = false
+            __logError("Save preset collection write failed: " + String(e3))
+        }
+
+        if (!ok) {
+            Interactive.error(
+                        qsTr("Preset file save failed."),
+                        qsTr("The file could not be written. MuseScore's plugin API may block writing outside allowed directories. Save the file inside the MuseScore4 folder.\n\nFailed:\n%1").arg(path)
+                        )
+            return false
+        }
+
+        try {
+            ocPrefs.lastPresetCollectionPath = path
+            if (ocPrefs.sync) ocPrefs.sync()
+        } catch (e4) {}
+
+        Interactive.info(
+                    qsTr("Preset file saved."),
+                    qsTr("%1 presets were written to:\n%2")
+                    .arg(doc.presets.length)
+                    .arg(path)
+                    )
+        return true
+    }
+
+    function openPresetLoadDialog() {
+        presetLoadDialog.open()
+    }
+
+    function openPresetSaveDialog() {
+        presetSaveDialog.open()
+    }
+
+    FileDialog {
+        id: presetLoadDialog
+        type: FileDialog.Load
+        title: qsTr("Load preset collection")
+        folder: ""
+        onAccepted: {
+            var localPath = String(filePath ?? "").trim()
+            root.__logInfo("presetLoadDialog accepted filePath=" + localPath)
+            if (localPath.length)
+                root.loadPresetCollectionFromPath(localPath)
+        }
+        onRejected: {
+            root.__logInfo("presetLoadDialog rejected")
+        }
+    }
+
+
+    FileDialog {
+        id: presetSaveDialog
+        type: FileDialog.Save
+        title: qsTr("Save preset collection")
+        folder: ""
+        onAccepted: {
+            var localPath = String(filePath ?? "").trim()
+            root.__logInfo("presetSaveDialog accepted filePath=" + localPath)
+            if (localPath.length)
+                root.savePresetCollectionToPath(localPath)
+        }
+        onRejected: {
+            root.__logInfo("presetSaveDialog rejected")
         }
     }
 
@@ -2868,6 +3127,29 @@ MuseScore {
                     }
 
                     Item { Layout.fillWidth: true }
+
+                    FlatButton {
+                        icon: IconCode.OPEN_FILE
+                        enabled: true
+                        toolTipTitle: qsTr("Open / Save presets")
+                        onClicked: {
+                            let choice = Interactive.question(
+                                    qsTr("Open / Save presets?"),
+                                    qsTr("Open or save the complete list of presets."),
+                                    [qsTr("Open"), qsTr("Save"), qsTr("Cancel")]
+                                    )
+                            if (!choice || choice === qsTr("Cancel"))
+                                return
+                            if (choice === qsTr("Open")) {
+                                root.openPresetLoadDialog()
+                                return
+                            }
+                            if (choice === qsTr("Save")) {
+                                root.openPresetSaveDialog()
+                                return
+                            }
+                        }
+                    }
 
                     FlatButton {
                         id: cardView
