@@ -562,18 +562,6 @@ MuseScore {
         }
     }
 
-    function presetCollectionFileUrlToLocalPath(fileUrl) {
-        var s = String(fileUrl === undefined || fileUrl === null ? "" : fileUrl)
-        if (!s.length)
-            return ""
-        try {
-            s = decodeURIComponent(s)
-        } catch (e) {}
-        s = s.replace(/^file:\/\/\/([A-Za-z]:\/.*)$/, "$1")
-        s = s.replace(/^file:\/\//, "")
-        return s
-    }
-
     function normalizePresetCollectionSavePath(localPath) {
         var path = String(localPath ?? "").trim()
         if (!path.length)
