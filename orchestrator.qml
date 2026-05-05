@@ -1739,10 +1739,11 @@ MuseScore {
         if (rowIndex === 7) return "B" // Bottom
         return String(rowIndex)
     }
+
     function __recordIgnoredRows(warningSink, staffIdx, tick, noteCount, rowIndices) {
         if (!warningSink || !rowIndices || !rowIndices.length)
             return
-        var sig = staffIdx + ":" + tick + ":" + noteCount + ":" + rows.join(",")
+        var sig = staffIdx + ":" + tick + ":" + noteCount + ":" + rowIndicies.join(",")
 
         if (!warningSink._seen)
             warningSink._seen = {}
@@ -1755,7 +1756,7 @@ MuseScore {
                              staffIdx,
                              tick,
                              noteCount,
-                             rows: rows.slice(0)
+                             rows: rowIndicies.slice(0)
                          })
     }
 
