@@ -741,7 +741,7 @@ MuseScore {
         if (!ok) {
             Interactive.error(
                         qsTr("Preset file save failed."),
-                        qsTr("The file could not be written. MuseScore's plugin API may block writing outside allowed directories. Save the file inside the MuseScore4 folder.\n\nFailed:\n%1").arg(path)
+                        qsTr("The file could not be written. MuseScore's plugin API may block writing outside allowed directories. Save anywhere in the MuseScore folder.\n\nFailed:\n%1").arg(path)
                         )
             return false
         }
