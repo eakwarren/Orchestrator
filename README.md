@@ -25,7 +25,7 @@ Developed with ❤️ by Eric Warren
 
    Move the selected preset up or down with the Arrow buttons. Assign a color with the Brush button. Copy and Paste a preset to a new empty preset. Delete a preset with the Trash button.
 
-   <img width="902" height="516" alt="orchestrator_settings" src="https://github.com/user-attachments/assets/7869e22f-a16b-4924-a0f2-799e8fbe95db" />
+   <img width="902" height="516" alt="settings_window" src="https://github.com/user-attachments/assets/e6806381-c746-48c3-a907-fa0302eb7816" />
 
    Orchestrator presets stay attached to the same score instruments even if you reorder the score. If you rename, replace, split, merge, or remove instruments, unresolved mappings will be skipped. Duplicate instruments are marked with a red sidebar.
 
@@ -35,17 +35,20 @@ Developed with ❤️ by Eric Warren
 > [!TIP]
 > Select multiple instruments with Cmd/Ctrl+click to quickly assign them to the same note. Also, click the triangle button to the right of the preset name to toggle a compact view of only the instruments used by the preset.
 
-4. Close the Settings panel. Each preset card includes the preset name, number of chord notes, and a list of instruments. Use the Filter to search for a preset or instrument. Change to a compact view with the button filled with squares.
+4. Close the Settings panel. Each preset card includes the preset name, number of chord notes, and a list of instruments.
 
-   <img width="300" height="514" alt="orchestrator_presets" src="https://github.com/user-attachments/assets/7822c0ee-cd13-4f10-b2e5-b8069af81ebb" />
+   Use the Filter to search for a preset or instrument. Open or Save preset collections with the folder button. Toggle a compact view with the rectangles button.
+
+   <img width="300" height="514" alt="plugin_window" src="https://github.com/user-attachments/assets/89b3a03c-0dd8-4976-95f7-719cefbc49d6" />
 
    Make a selection in the score from a sketch staff and click a preset button to run the preset. 
 
    Before
-   <img width="1331" height="687" alt="before" src="https://github.com/user-attachments/assets/26de64f8-6261-466f-be9b-6400898557ec" />
+   <img width="1331" height="687" alt="score_before" src="https://github.com/user-attachments/assets/f293dd91-3046-49f8-a6b8-f6565179da39" />
 
    After
-   <img width="1290" height="761" alt="after" src="https://github.com/user-attachments/assets/061e65c6-4a9a-49fb-afb4-761c133cd590" />
+   <img width="1290" height="761" alt="score_after" src="https://github.com/user-attachments/assets/c0e795ff-fb45-494a-a887-8ee3225fa162" />
+
 
 
 
@@ -76,5 +79,12 @@ MuseScore Studio developers, wherever they may roam.
 
 
 ## Release Notes
+v0.2.9 5/6/26
+- open / save preset collections
+- auto-refresh instrument lists
+- support for reordered score instruments
+- duplicate instrument indicators
+
+
 v0.2.6 4/27/26
 - Initial beta release
