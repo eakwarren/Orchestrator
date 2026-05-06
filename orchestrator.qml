@@ -2507,14 +2507,23 @@ MuseScore {
         if (targetInfo.missingStableKeys && targetInfo.missingStableKeys.length) {
             for (var i = 0; i < targetInfo.missingStableKeys.length; ++i) {
                 var missingKey = targetInfo.missingStableKeys[i];
-                var missingName = presetInstLongNameForStableKey(presetObj, missingKey) || qsTr("Unknown instrument");
+                var missingName = String(
+                            (missingKey && missingKey.instName) ||
+                            presetInstLongNameForStableKey(presetObj, missingKey ? missingKey.stableKey : "") ||
+                            qsTr("Unknown instrument")
+                            );
                 lines.push(qsTr("Missing destination: %1").arg(missingName));
             }
         }
+
         if (targetInfo.duplicateStableKeys && targetInfo.duplicateStableKeys.length) {
             for (var j = 0; j < targetInfo.duplicateStableKeys.length; ++j) {
                 var dupKey = targetInfo.duplicateStableKeys[j];
-                var dupName = presetInstLongNameForStableKey(presetObj, dupKey) || qsTr("Unknown instrument");
+                var dupName = String(
+                            (dupKey && dupKey.instName) ||
+                            presetInstLongNameForStableKey(presetObj, dupKey ? dupKey.stableKey : "") ||
+                            qsTr("Unknown instrument")
+                            );
                 lines.push(qsTr("Duplicate destination: %1").arg(dupName));
             }
         }
@@ -2522,11 +2531,14 @@ MuseScore {
         if (!lines.length)
             return;
 
-        Interactive.info(
-                    qsTr("Some preset destinations were skipped."),
-                    lines.join("\n"),
-                    [qsTr("Ok")]
-                    );
+        var messageText = lines.join("\n");
+        Qt.callLater(function () {
+            Interactive.info(
+                        qsTr("Some preset destinations were skipped."),
+                        messageText,
+                        [qsTr("Ok")]
+                        );
+        });
     }
 
     function firePreset(presetIndex, opts) {
