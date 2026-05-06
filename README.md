@@ -21,9 +21,9 @@ Developed with ❤️ by Eric Warren
 > [!TIP]
 > Set a keyboard shortcut in MuseScore's Preferences > Shortcuts panel. Search for "orchestrator" and define a shortcut. For example, ⌘⇧+O.
 
-3. Open the Orchestrator plugin and click the Settings (gear) icon. In the Settings section, click Add to create a new preset. Rename it, select an instrument and assign notes and pitch modifications as needed. Repeat this process for to create additional presets.
+3. Open the Orchestrator plugin and click the Settings (gear) button. In the Settings section, click Add to create a new preset. Rename it, select an instrument and assign notes and pitch modifications as needed. Repeat this process for to create additional presets.
 
-   Move the selected preset up or down with the Arrow buttons. Assign a color with the Brush button. Copy and Paste a preset to a new empty preset. Delete a preset with the Trash button.
+   Move the selected preset up or down with the Arrow buttons. Assign a color with the Brush button. Copy and Paste a preset to a new empty preset. Delete a preset with the Trash button. Click the triangle button to the right of the preset name to toggle a compact view of only the instruments used by the preset.
 
    <img width="902" height="516" alt="settings_window" src="https://github.com/user-attachments/assets/e6806381-c746-48c3-a907-fa0302eb7816" />
 
@@ -33,7 +33,7 @@ Developed with ❤️ by Eric Warren
 
    
 > [!TIP]
-> Select multiple instruments with Cmd/Ctrl+click to quickly assign them to the same note. Also, click the triangle button to the right of the preset name to toggle a compact view of only the instruments used by the preset.
+> Select multiple instruments with Cmd/Ctrl+click to quickly assign them to the same note.
 
 4. Close the Settings panel. Each preset card includes the preset name, number of chord notes, and a list of instruments.
 
