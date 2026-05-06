@@ -1730,7 +1730,7 @@ MuseScore {
     function __recordIgnoredRows(warningSink, staffIdx, tick, noteCount, rowIndices) {
         if (!warningSink || !rowIndices || !rowIndices.length)
             return
-        var sig = staffIdx + ":" + tick + ":" + noteCount + ":" + rowIndicies.join(",")
+        var sig = staffIdx + ":" + tick + ":" + noteCount + ":" + rowIndices.join(",")
 
         if (!warningSink._seen)
             warningSink._seen = {}
@@ -1743,7 +1743,7 @@ MuseScore {
                              staffIdx,
                              tick,
                              noteCount,
-                             rows: rowIndicies.slice(0)
+                             rows: rowIndices.slice(0)
                          })
     }
 
