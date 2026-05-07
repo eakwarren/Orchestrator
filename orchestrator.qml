@@ -1181,7 +1181,40 @@ MuseScore {
                                  if (!p || !p.noteRowsByStableKey)
                                      return "";
                                  var keys = presetActiveStableKeys(p);
-                                 return presetInstLongNamesFromStableKeys(p, keys);
+                                 if (!keys.length) return "";
+
+                                 var parts = [];
+
+                                 for (var i = 0; i < keys.length; ++i) {
+                                     var stableKey = keys[i];
+                                     var name = presetInstLongNameForStableKey(p, stableKey) || qsTr("Unknown instrument");
+                                     var rows = presetRowsForStableKey(p, stableKey);
+
+                                     var offsets = [];
+                                     var firstOffset = 0;
+
+                                     if (rows && rows.length) {
+                                         for (var r = 0; r < rows.length; ++r) {
+                                             if (rows[r] && rows[r].active) {
+                                                 var v = Number(rows[r].offset || 0);
+                                                 if (v !== 0 && offsets.indexOf(v) === -1)
+                                                     offsets.push(v);
+                                                 if (firstOffset === 0)
+                                                     firstOffset = v;
+                                             }
+                                         }
+                                     }
+
+                                     if (offsets.length === 1) {
+                                         name += " (" + offsets[0] + ")";
+                                     } else if (offsets.length > 1) {
+                                         name += " (" + firstOffset + "...)";
+                                     }
+
+                                     parts.push(name);
+                                 }
+
+                                 return parts.join(", ");
                              })(),
                          })
         }
