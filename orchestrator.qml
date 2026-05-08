@@ -58,7 +58,9 @@ MuseScore {
 
     property int baseWidth: 300
     property bool settingsOpen: false
+    property int cardViewMode: 0
     property bool gridView: false
+    property bool headerOnlyCardView: false
     property bool usedInstView: false
     property var duplicateStaffMap: ({})
     property var orchestratorWin: null
@@ -67,6 +69,21 @@ MuseScore {
     property int lastAnchorIndex: -1
     property int currentStaffIdx: -1
     property bool liveCommitEnabled: true
+
+    function syncCardViewState() {
+        var mode = Number(cardViewMode)
+        if (isNaN(mode)) mode = 0
+        if (mode < 0) mode = 0
+        if (mode > 3) mode = 3
+
+        if (cardViewMode !== mode) {
+            cardViewMode = mode
+            return
+        }
+
+        gridView = (mode === 2 || mode === 3)
+        headerOnlyCardView = (mode === 1 || mode === 3)
+    }
 
     // Theme
     property bool isDarkTheme: (function () {
@@ -84,6 +101,7 @@ MuseScore {
         property bool lastSettingsOpen: false
         property int  lastWindowHeight: 0
         property bool lastGridView: false
+        property int  lastCardViewMode: 0
         property int  lastSelectedIndex: -1
         property int  lastWindowX: 0
         property int  lastWindowY: 0
@@ -105,10 +123,11 @@ MuseScore {
                                            byStableKey: ({})
                                        })
 
-    // Persist 1-across vs 2-across preset layout
-    onGridViewChanged: {
+    // Persist 4-state preset card layout
+    onCardViewModeChanged: {
+        syncCardViewState()
         try {
-            ocPrefs.lastGridView = !!gridView;
+            ocPrefs.lastCardViewMode = Number(cardViewMode)
             if (ocPrefs.sync) ocPrefs.sync();
         } catch (e) {}
     }
@@ -2890,8 +2909,9 @@ MuseScore {
                 orchestratorWin.height = Math.max(minH, savedH);
             }
 
-            // Restore gridView before populating cards (affects layout widths)
-            root.gridView = !!ocPrefs.lastGridView;
+            // Restore card view mode before populating cards (affects layout widths/heights)
+            root.cardViewMode = Number(ocPrefs.lastCardViewMode ?? 0)
+            root.syncCardViewState()
 
             // Restore position pre-show (best-effort; clamped again post-show)
             try {
@@ -3185,11 +3205,17 @@ MuseScore {
 
                     FlatButton {
                         id: cardView
-                        icon: root.gridView ? IconCode.SPLIT_VIEW_VERTICAL : IconCode.GRID
-                        toolTipTitle: qsTr("Toggle preset view")
+                        icon: {
+                            switch (root.cardViewMode) {
+                            case 0: return IconCode.LIST
+                            case 1: return IconCode.GRID
+                            case 2: return IconCode.TOOLBAR_GRIP
+                            default: return IconCode.SPLIT_VIEW_VERTICAL
+                            }
+                        }
+                        toolTipTitle: qsTr("Cycle preset view")
                         onClicked: {
-                            root.gridView = !root.gridView
-
+                            root.cardViewMode = (root.cardViewMode + 1) % 4
                         }
                     }
 
@@ -3259,7 +3285,7 @@ MuseScore {
                             width: Math.floor(presetScroll.availableWidth) - rootUI.cardRightTrim
                             spacing: 8
 
-                            // --- NEW: adaptive grid support (1-up vs 2-up) ---
+                            // --- adaptive grid support (1-up vs 2-up) ---
                             // When root.gridView is true -> 2 columns; otherwise 1 column (full width).
                             // We compute card width so two cards fit in one row with Flow.spacing between them.
                             property int cardsPerRow: root.gridView ? 2 : 1
@@ -3290,10 +3316,8 @@ MuseScore {
 
                                     // NEW: width adapts to single- or two-column layout
                                     width: presetsFlow.cardWidth()
-                                    // Keep the height as-is (mock shows short cards)
-                                    height: root.gridView ? 120 : 100
+                                    height: root.headerOnlyCardView ? 38 : (root.gridView ? 146 : 102)
                                     Behavior on height { NumberAnimation { duration: 180; easing.type: Easing.InOutQuad } }
-
                                     radius: 3
 
                                     // Smooth transition when toggling gridView
@@ -3328,7 +3352,7 @@ MuseScore {
 
                                         color: baseColor
 
-                                        // ✔ NEW: Selected card always has border in settings mode
+                                        // Selected card always has border in settings mode
                                         border.width: (isSelectedInSettings ? 2 : 0)
                                         border.color: ui.theme.fontPrimaryColor
                                     }
@@ -3446,12 +3470,12 @@ MuseScore {
                                         // Second row: staves list — measured truncation within 4 lines, ending with "..."
                                         Item {
                                             id: stavesWrap
+                                            visible: !root.headerOnlyCardView
                                             width: parent.width
-                                            height: Math.max(0, cardContent.height - headerRow.height - cardContent.spacing)
+                                            height: visible ? Math.max(0, cardContent.height - headerRow.height - cardContent.spacing) : 0
                                             clip: true
-
                                             // Config
-                                            readonly property int maxLines: root.gridView ? 5 : 4
+                                            readonly property int maxLines: root.gridView ? 7 : 4
                                             property string fullStaves: model.staves
                                             property string displayStaves: fullStaves
 
@@ -3514,8 +3538,7 @@ MuseScore {
                                             onHeightChanged: recompute()
                                             onFullStavesChanged: recompute()
                                             Component.onCompleted: stavesWrap.recompute()
-                                            Connections { target: root; function onGridViewChanged() { stavesWrap.recompute() } }
-
+                                            Connections { target: root; function onCardViewModeChanged() { stavesWrap.recompute() } }
                                             // Actual displayed text (multi-line, no overlay ellipsis)
                                             Text {
                                                 id: stavesText
