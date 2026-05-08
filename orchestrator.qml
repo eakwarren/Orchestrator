@@ -1146,6 +1146,122 @@ MuseScore {
                 : "#" + hex(r) + hex(g) + hex(b);          // RGB form
     }
 
+    readonly property var presetFilterColorHexes: ({
+                                                       red:     ["#f25555", "#f28585"],
+                                                       orange:  ["#e1720b", "#edb17a"],
+                                                       yellow:  ["#ac8c1a", "#e0cc87"],
+                                                       green:   ["#27a341", "#8bc9c5"],
+                                                       blue:    ["#2093fe", "#70afea"],
+                                                       purple:  ["#926bff", "#a09eef"],
+                                                       magenta: ["#e454c4", "#dba0c7"]
+                                                   })
+
+    function parsePresetFilterQuery(text) {
+        var raw = String(text ?? "").trim().toLowerCase()
+        var result = {
+            textTerms: [],
+            colorTags: [],
+            noteCounts: []
+        }
+
+        if (!raw.length)
+            return result
+
+        var tokens = raw.split(/\s+/)
+        var colorSeen = ({})
+        var countSeen = ({})
+        var textTerms = []
+
+        for (var i = 0; i < tokens.length; ++i) {
+            var tok = String(tokens[i] ?? "").trim()
+            if (!tok.length)
+                continue
+
+            if (tok.charAt(0) === "@") {
+                var tag = tok.slice(1)
+
+                if (presetFilterColorHexes[tag] !== undefined) {
+                    if (!colorSeen[tag]) {
+                        colorSeen[tag] = true
+                        result.colorTags.push(tag)
+                    }
+                    continue
+                }
+
+                if (/^[1-8]$/.test(tag)) {
+                    if (!countSeen[tag]) {
+                        countSeen[tag] = true
+                        result.noteCounts.push(Number(tag))
+                    }
+                    continue
+                }
+            }
+
+            textTerms.push(tok)
+        }
+
+        result.textTerms = textTerms
+        return result
+    }
+
+    function presetMatchesTextTerms(name, staves, textTerms) {
+        if (!textTerms || !textTerms.length)
+            return true
+
+        var haystack = (String(name ?? "") + " " + String(staves ?? "")).toLowerCase()
+        for (var i = 0; i < textTerms.length; ++i) {
+            if (haystack.indexOf(String(textTerms[i])) === -1)
+                return false
+        }
+        return true
+    }
+
+    function presetMatchesColorTags(presetObj, colorTags) {
+        if (!colorTags || !colorTags.length)
+            return true
+
+        var bg = String((presetObj && presetObj.backgroundColor) ?? "").trim().toLowerCase()
+        if (!bg.length)
+            return false
+
+        for (var i = 0; i < colorTags.length; ++i) {
+            var tag = colorTags[i]
+            var hexes = presetFilterColorHexes[tag] || []
+            if (hexes.indexOf(bg) >= 0)
+                return true
+        }
+
+        return false
+    }
+
+    function presetMatchesNoteCountTags(count, noteCounts) {
+        if (!noteCounts || !noteCounts.length)
+            return true
+
+        var n = Number(count ?? 0)
+        for (var i = 0; i < noteCounts.length; ++i) {
+            if (n === Number(noteCounts[i]))
+                return true
+        }
+
+        return false
+    }
+
+    function presetMatchesFilterQuery(presetObj, name, staves, count, filterText) {
+        var parsed = parsePresetFilterQuery(filterText)
+
+        if (!presetMatchesTextTerms(name, staves, parsed.textTerms))
+            return false
+
+        if (!presetMatchesColorTags(presetObj, parsed.colorTags))
+            return false
+
+        if (!presetMatchesNoteCountTags(count, parsed.noteCounts))
+            return false
+
+        return true
+    }
+
     // Instrument name (no ": Staff N") on the preset card
     function staffInstrumentNameByIdx(staffIdx) {
         var p = partForStaff(staffIdx);
@@ -3335,16 +3451,17 @@ MuseScore {
                                     // Cards are only "selectable" when settings panel is open
                                     property bool selected: root.settingsOpen && (rootUI.selectedIndex === model.index)
                                     property bool matchesFilter: {
-                                        var t = rootUI.setFilterText;
-                                        if (!t || t.length === 0)
-                                            return true;
-                                        var f = t.toLowerCase();
-                                        return (name.toLowerCase().indexOf(f) !== -1)
-                                                || (staves.toLowerCase().indexOf(f) !== -1);
+                                        return root.presetMatchesFilterQuery(
+                                                    root.presets && root.presets[model.index] ? root.presets[model.index] : null,
+                                                    name,
+                                                    staves,
+                                                    count,
+                                                    rootUI.setFilterText
+                                                    )
                                     }
                                     visible: matchesFilter
 
-                                    // NEW: width adapts to single- or two-column layout
+                                    // width adapts to single- or two-column layout
                                     width: presetsFlow.cardWidth()
                                     height: root.headerOnlyCardView ? 38 : (root.gridView ? 146 : 102)
                                     Behavior on height { NumberAnimation { duration: 180; easing.type: Easing.InOutQuad } }
