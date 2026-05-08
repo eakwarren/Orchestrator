@@ -1507,6 +1507,36 @@ MuseScore {
         }
     }
 
+    function deleteAllPresets() {
+        if (!presets.length)
+            return;
+
+        presets = [];
+        notifyPresetsMutated();
+        savePresetsToSettings();
+        refreshPresetsListModel();
+        refreshStaffActiveRows();
+
+        var uiRef = orchestratorWin ? orchestratorWin.rootUIRef : null;
+        var tf = orchestratorWin ? orchestratorWin.presetTitleFieldRef : null;
+
+        if (tf) {
+            tf.text = qsTr("");
+            tf.cursorPosition = 0;
+            tf.deselect();
+        }
+
+        if (uiRef) {
+            uiRef.selectedIndex = -1;
+        }
+
+        clearSelection();
+        if (orchestratorWin && orchestratorWin.staffListRef)
+            orchestratorWin.staffListRef.currentIndex = -1;
+
+        resetNoteButtonsUI();
+    }
+
     function saveCurrentPreset() {
         var uiRef = orchestratorWin ? orchestratorWin.rootUIRef : null
         var model = orchestratorWin ? orchestratorWin.allPresetsModelRef : null
@@ -4122,14 +4152,30 @@ MuseScore {
                 FlatButton {
                     icon: IconCode.DELETE_TANK
                     enabled: (allPresetsModel.count > 0)
-                    toolTipTitle: qsTr("Delete preset")
-                    onClicked: {
+                    toolTipTitle: qsTr("Delete preset\nCmd/Ctrl: Delete all presets")
+                    onClicked: function(mouse) {
+                        var ctrlOrCmd = false;
+                        if (mouse && mouse.modifiers !== undefined) {
+                            ctrlOrCmd = !!((mouse.modifiers & Qt.ControlModifier) || (mouse.modifiers & Qt.MetaModifier));
+                        }
+
+                        var parentObj = orchestratorWin ? orchestratorWin : root;
+
+                        if (ctrlOrCmd) {
+                            confirmDeleteComponent.createObject(parentObj, {
+                                                                    deleteAll: true,
+                                                                    titleText: qsTr("Delete all presets?"),
+                                                                    messageText: qsTr("Do you really want to delete ALL presets?")
+                                                                });
+                            return;
+                        }
+
                         if (rootUI.selectedIndex >= 0 && rootUI.selectedIndex < allPresetsModel.count) {
                             const n = allPresetsModel.get(rootUI.selectedIndex).name;
-                            // Create a fresh dialog for this request, parented to the window
-                            var parentObj = orchestratorWin ? orchestratorWin : root;
-                            var dlg = confirmDeleteComponent.createObject(parentObj, {
+                            confirmDeleteComponent.createObject(parentObj, {
                                                                               presetIndex: rootUI.selectedIndex,
+                                                                              deleteAll: false,
+                                                                              titleText: qsTr("Delete preset?"),
                                                                               messageText: qsTr("Do you really want to delete %1?").arg(n)
                                                                           });
                         }
@@ -4957,6 +5003,8 @@ MuseScore {
                     anchors.fill: parent
                     z: 99999 // Always stays above plugin UI
                     property int presetIndex: -1
+                    property bool deleteAll: false
+                    property string titleText: qsTr("Delete preset?")
                     property string messageText: ""
 
                     // --- Dimmed backdrop ---
@@ -4977,7 +5025,7 @@ MuseScore {
                         anchors.horizontalCenter: parent.horizontalCenter
                         anchors.verticalCenter: parent.verticalCenter
 
-                        // NEW: card height based on content
+                        // card height based on content
                         height: contentColumn.implicitHeight + 40   // margins * 2
 
                         Column {
@@ -4988,7 +5036,7 @@ MuseScore {
 
                             // Title
                             Label {
-                                text: qsTr("Delete preset?")
+                                text: dlg.titleText
                                 font.pixelSize: 16
                                 font.bold: true
                                 color: ui.theme.fontPrimaryColor
@@ -5026,7 +5074,10 @@ MuseScore {
                                     accentButton: true
                                     transparent: false
                                     onClicked: {
-                                        win.pluginRoot.deletePresetAtIndex(dlg.presetIndex)
+                                        if (dlg.deleteAll)
+                                            win.pluginRoot.deleteAllPresets()
+                                        else
+                                            win.pluginRoot.deletePresetAtIndex(dlg.presetIndex)
                                         dlg.destroy()
                                     }
                                 }
