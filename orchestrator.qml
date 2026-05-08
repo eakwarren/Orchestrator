@@ -3443,7 +3443,7 @@ MuseScore {
                                             }
                                         }
 
-                                        // Second row: staves list — measured truncation within 4 lines, ending with " more..."
+                                        // Second row: staves list — measured truncation within 4 lines, ending with "..."
                                         Item {
                                             id: stavesWrap
                                             width: parent.width
@@ -3465,7 +3465,7 @@ MuseScore {
                                                 font.pixelSize: 12
                                             }
 
-                                            // Compute the longest word-prefix that fits with " more..." inside maxLines
+                                            // Compute the longest word-prefix that fits with "..." inside maxLines
                                             function recompute() {
                                                 var base = String(fullStaves || "")
                                                 // Defer until we have geometry
@@ -3486,10 +3486,10 @@ MuseScore {
                                                     return
                                                 }
 
-                                                // Otherwise binary-search the maximum number of words that fit with " more..."
+                                                // Otherwise binary-search the maximum number of words that fit with "..."
                                                 var words = base.split(/\s+/)
                                                 var lo = 0, hi = words.length, fit = 0
-                                                var suffix = qsTr(" more...")
+                                                var suffix = qsTr("...")
 
                                                 while (lo <= hi) {
                                                     var mid = Math.floor((lo + hi) / 2)
