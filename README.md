@@ -23,7 +23,7 @@ Developed with ❤️ by Eric Warren
 
 3. Open the Orchestrator plugin and click the Settings (gear) button. In the Settings section, click Add to create a new preset. Rename it, select an instrument and assign notes and pitch modifications as needed. Repeat this process for to create additional presets.
 
-   Move the selected preset up or down with the Arrow buttons. Assign a color with the Brush button. Copy and Paste a preset to a new empty preset. Delete a preset with the Trash button. Click the triangle button to the right of the preset name to toggle a compact view of only the instruments used by the preset.
+   Move the selected preset up or down with the Arrow buttons. Assign a color with the Brush button. Copy and Paste a preset to a new empty preset. Delete a preset with the Trash button (Cmd/Ctrl+click deletes all presets - useful when loading preset collections described below). Click the triangle button to the right of the preset name to toggle a compact view of only the instruments used by the preset.
 
    <img width="902" height="516" alt="settings_window" src="https://github.com/user-attachments/assets/e6806381-c746-48c3-a907-fa0302eb7816" />
 
@@ -35,11 +35,15 @@ Developed with ❤️ by Eric Warren
 > [!TIP]
 > Select multiple instruments with Cmd/Ctrl+click to quickly assign them to the same note.
 
-4. Close the Settings panel. Each preset card includes the preset name, number of chord notes, and a list of instruments.
+4. Close the Settings panel. Each preset card includes the preset name, number of chord notes, and a list of instruments with any pitch offsets.
 
-   Use the Filter to search for a preset or instrument. Open or Save preset collections with the folder button. Toggle a compact view with the rectangles button.
+   Use the Filter to search for a preset or instrument. Use @color (red, orange, yellow, green, blue, purple or magenta) to filter by preset color, or @n (1-8) to filter by number of notes shown on the top right of a preset.
 
-   <img width="300" height="514" alt="plugin_window" src="https://github.com/user-attachments/assets/89b3a03c-0dd8-4976-95f7-719cefbc49d6" />
+   `violoncellos @orange @3`
+
+   Open or Save preset collections with the folder button. Select different views with the lines button.
+
+   <img width="300" height="514" alt="plugin_window" src="https://github.com/user-attachments/assets/d8ce62f2-725d-4bfe-bc8e-725019313cd1" />
 
    Make a selection in the score from a sketch staff and click a preset button to run the preset. 
 
