@@ -37,20 +37,16 @@ Developed with ❤️ by Eric Warren
 
 4. Close the Settings panel. Each preset card includes the preset name, number of chord notes, and a list of instruments with any pitch offsets.
 
-   Use the Filter to search for a preset or instrument. Use @color (red, orange, yellow, green, blue, purple or magenta) to filter by preset color, or @n (1-8) to filter by number of notes shown on the top right of a preset.
-
-   `violoncellos @orange @3`
+   Use the Filter to search for a preset or instrument. Use @color (red, orange, yellow, green, blue, purple or magenta) to filter by preset color, or @n (1-8) to filter by number of notes shown on the top right of a preset. For example, `violoncellos @orange @3`
 
    Open or Save preset collections with the folder button. Select different views with the lines button.
 
    <img width="300" height="514" alt="plugin_window" src="https://github.com/user-attachments/assets/d8ce62f2-725d-4bfe-bc8e-725019313cd1" />
 
-   Make a selection in the score from a sketch staff and click a preset button to run the preset. 
-
-   Before
+   Make a selection in the score from a sketch staff.
    <img width="1331" height="687" alt="score_before" src="https://github.com/user-attachments/assets/f293dd91-3046-49f8-a6b8-f6565179da39" />
 
-   After
+   Click a preset to apply the orchestration. 
    <img width="1290" height="761" alt="score_after" src="https://github.com/user-attachments/assets/c0e795ff-fb45-494a-a887-8ee3225fa162" />
 
 
