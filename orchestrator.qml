@@ -29,7 +29,7 @@ MuseScore {
     description: qsTr("Preset system to quickly orchestrate sketches in MuseScore")
     categoryCode: "composing-arranging-tools"
     thumbnailName: "orchestrator.png"
-    version: "0.2.9"
+    version: "0.2.10"
 
     //--------------------------------------------------------------------------------
     // Log Engine
@@ -1919,6 +1919,59 @@ MuseScore {
         cmd("voice-" + (vv + 1))
     }
 
+    function __selectStaffRangeForVoiceChange(staffIdx, startTick, endTick) {
+        if (!curScore || !curScore.selection || !curScore.selection.selectRange)
+            return false
+
+        var st = Number(startTick ?? 0)
+        var et = Number(endTick ?? st)
+        var sid = Number(staffIdx)
+
+        if (isNaN(st) || isNaN(et) || isNaN(sid) || sid < 0)
+            return false
+
+        if (et <= st)
+            et = st + 1
+
+        try {
+            __clearScoreSelection()
+        } catch (e0) {}
+
+        try {
+            return !!curScore.selection.selectRange(st, et, sid, sid + 1)
+        } catch (e1) {
+            __logWarn(
+                        "__selectStaffRangeForVoiceChange failed staffIdx=" + sid +
+                        " startTick=" + st +
+                        " endTick=" + et +
+                        " error=" + String(e1)
+                        )
+            return false
+        }
+    }
+
+    function __verifyVoicePassMaterial(staffIdx, voiceIdx, passPlan) {
+        if (!passPlan || !passPlan.length)
+            return true
+
+        for (var i = 0; i < passPlan.length; ++i) {
+            var entry = passPlan[i]
+            if (!entry || entry.tick === undefined)
+                continue
+
+            if (!__selectChordNoteAtTick(staffIdx, voiceIdx, entry.tick)) {
+                __logWarn(
+                            "__verifyVoicePassMaterial failed staffIdx=" + staffIdx +
+                            " voice=" + voiceIdx +
+                            " tick=" + entry.tick
+                            )
+                return false
+            }
+        }
+
+        return true
+    }
+
     // --- Row labeling & diagnostics (UI / warnings only) ------------------------
     function __rowLabel(rowIndex) {
         if (rowIndex === 0) return "T" // Top
@@ -2217,6 +2270,136 @@ MuseScore {
 
         try {
             curScore.selection.select(el.notes[0])
+            return true
+        } catch (e) {
+            return false
+        }
+    }
+
+    function __selectChordRowPositionAtTick(staffIdx, voiceIdx, tick, rowPosition) {
+        if (!__selectChordNoteAtTick(staffIdx, voiceIdx, tick))
+            return false
+
+        __doTopChord()
+
+        var pos = Number(rowPosition ?? 0)
+        if (isNaN(pos) || pos < 0)
+            pos = 0
+
+        for (var i = 0; i < pos; ++i)
+            __doDownChord()
+
+        return true
+    }
+
+    function __deleteAllNotesAtTickForVoice(staffIdx, voiceIdx, tick) {
+        var guard = 0
+        while (__selectChordNoteAtTick(staffIdx, voiceIdx, tick) && guard < 32) {
+            __doDelete()
+            guard++
+        }
+        return guard
+    }
+
+    function __runSparseVoicePassFromSourcePlan(staffIdx, passPlan, voiceIdx) {
+        if (!passPlan || !passPlan.length)
+            return true
+
+        for (var i = 0; i < passPlan.length; ++i) {
+            var entry = passPlan[i]
+            if (!entry || entry.tick === undefined)
+                continue
+
+            var rowsForVoice = entry.rowsForVoice || ({})
+            var orderedRows = __orderedValidRowsForNoteCount(entry.noteCount)
+            var rowsToMove = []
+
+            for (var r = 0; r < orderedRows.length; ++r) {
+                var rowIndex = orderedRows[r]
+                var spec = rowsForVoice[String(rowIndex)]
+                if (spec) {
+                    rowsToMove.push({
+                                        rowIndex: rowIndex,
+                                        originalPosition: r,
+                                        spec: spec
+                                    })
+                }
+            }
+
+            if (!rowsToMove.length) {
+                __deleteAllNotesAtTickForVoice(staffIdx, 0, entry.tick)
+                continue
+            }
+
+            // Move selected notes from the freshly pasted Voice 1 material into target voice.
+            // Move bottom-to-top so deleting/moving lower notes does not disturb earlier positions.
+            for (var m = rowsToMove.length - 1; m >= 0; --m) {
+                var mv = rowsToMove[m]
+                if (!__selectChordRowPositionAtTick(staffIdx, 0, entry.tick, mv.originalPosition)) {
+                    __logWarn(
+                                "sparseVoicePass: source row not selectable before voice change staffIdx=" +
+                                staffIdx + " targetVoice=" + voiceIdx + " tick=" + entry.tick +
+                                " rowIndex=" + mv.rowIndex
+                                )
+                    continue
+                }
+
+                __setVoice(voiceIdx)
+            }
+
+            // Delete any notes left in Voice 1 from this temporary paste.
+            __deleteAllNotesAtTickForVoice(staffIdx, 0, entry.tick)
+
+            // Apply pitch offsets to the moved notes in target voice, top-to-bottom.
+            rowsToMove.sort(function(a, b) { return a.rowIndex - b.rowIndex })
+
+            for (var p = 0; p < rowsToMove.length; ++p) {
+                if (!__selectChordRowPositionAtTick(staffIdx, voiceIdx, entry.tick, p)) {
+                    __logWarn(
+                                "sparseVoicePass: moved target note not selectable staffIdx=" +
+                                staffIdx + " voice=" + voiceIdx + " tick=" + entry.tick +
+                                " movedPosition=" + p
+                                )
+                    continue
+                }
+
+                var keepSpec = rowsToMove[p].spec
+                var els = curScore.selection.elements
+                var note = (els && els.length) ? els[0] : null
+                if (note && note.tieBack)
+                    continue
+
+                if (!keepSpec.skipPitch)
+                    __applyPitchOffsetCommands(keepSpec.offset)
+            }
+        }
+
+        return true
+    }
+
+    function __selectChordAtTick(staffIdx, voiceIdx, tick) {
+        if (!curScore ||
+                tick === undefined ||
+                tick === null)
+            return false
+
+        var c = curScore.newCursor()
+        if (!c)
+            return false
+
+        c.track = staffBaseTrack(staffIdx) + voiceIdx
+
+        if (!__seekCursorToTick(c, tick))
+            return false
+
+        var el = c.element
+        if (!el ||
+                !el.notes ||
+                !el.notes.length)
+            return false
+
+        try {
+            curScore.selection.select(el)
             return true
         } catch (e) {
             return false
@@ -2611,14 +2794,18 @@ MuseScore {
         if (!__selectAnchorForStaffAtTick(staffIdx, startTick))
             return false
 
-        // 2) Paste once (paste range becomes selected)
+        // 2) Paste once. Pasted material initially lands in Voice 1.
         __doPaste()
 
-        // 3) Change voice while paste range is still selected
+        // 3) For non-Voice-1 passes, move only the requested note rows into the target
+        // voice. MuseScore does not allow plugin selection of Chord elements directly,
+        // so do not use __selectChordAtTick() here.
         if (voiceIdx !== 0)
-            __setVoice(voiceIdx)
+            return __runSparseVoicePassFromSourcePlan(staffIdx, passPlan, voiceIdx)
 
         // 4) Walk left to collapse range selection to first chord/note
+        // The later processing still explicitly reselects by tick, so this is only
+        // retained for compatibility with the existing command workflow.
         var stepsLeft = passPlan.length - 1
         for (var k = 0; k < stepsLeft; ++k)
             __doMoveLeft()
@@ -2629,7 +2816,14 @@ MuseScore {
             if (!entry || entry.tick === undefined)
                 continue
 
-            __selectChordNoteAtTick(staffIdx, voiceIdx, entry.tick)
+            if (!__selectChordNoteAtTick(staffIdx, voiceIdx, entry.tick)) {
+                __logWarn(
+                            "voicePass: target voice chord not selectable staffIdx=" +
+                            staffIdx + " voice=" + voiceIdx + " tick=" + entry.tick
+                            )
+                __doMoveRight()
+                continue
+            }
 
             var rowsForVoice = entry.rowsForVoice || ({})
             var orderedRows = __orderedValidRowsForNoteCount(entry.noteCount)
