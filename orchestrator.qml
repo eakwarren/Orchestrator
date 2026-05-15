@@ -1854,6 +1854,8 @@ MuseScore {
 
     function __doCopy()                 { cmd("action://copy") }
     function __doPaste()                { cmd("action://paste") }
+    function __doAppendMeasure()        { cmd("append-measure") }
+    function __doDeleteEmptyMeasures()  { cmd("del-empty-measures") }
 
     // --- Command primitives: navigation / selection -----------------------------
 
@@ -2221,6 +2223,35 @@ MuseScore {
         }
     }
 
+    function __scoreHasSegmentAtOrAfterTick(tick) {
+        if (!curScore ||
+                tick === undefined ||
+                tick === null)
+            return false
+
+        var c = curScore.newCursor()
+        if (!c)
+            return false
+
+        c.track = 0
+
+        if (!__seekCursorToTick(c, Number(tick)))
+            return false
+
+        if (!c.segment ||
+                c.segment.tick === undefined)
+            return false
+
+        return Number(c.segment.tick) >= Number(tick)
+    }
+
+    function __selectionEndsAtScoreEnd(endTick) {
+        // A selection that ends at the score boundary has no segment at/after endTick.
+        // Appending one temporary empty measure gives MuseScore a valid next segment
+        // for the existing command-based move-right workflow.
+        return !__scoreHasSegmentAtOrAfterTick(endTick)
+    }
+
     function __snapshotSourceSelectionForRestore() {
         if (!curScore ||
                 !curScore.selection)
@@ -2249,6 +2280,32 @@ MuseScore {
             startStaff: sourceStaffIdx,
             endStaff: sourceStaffIdx + 1
         }
+    }
+
+    function __restoreSelectionNow(snapshot) {
+        if (!snapshot ||
+                !curScore ||
+                !curScore.selection)
+            return false
+
+        var ok = false
+
+        try {
+            __clearScoreSelection()
+        } catch (e0) {}
+
+        try {
+            ok = !!curScore.selection.selectRange(
+                        Number(snapshot.startTick),
+                        Number(snapshot.endTick),
+                        Number(snapshot.startStaff),
+                        Number(snapshot.endStaff)
+                        )
+        } catch (e1) {
+            ok = false
+        }
+
+        return ok
     }
 
     function __restoreSelection(snapshot) {
@@ -2512,9 +2569,41 @@ MuseScore {
         return out
     }
 
+    function __cleanupChordAtTickNoPitch(staffIdx, voiceIdx, tick, noteCount, rowsForVoice) {
+        if (!__selectChordNoteAtTick(staffIdx, voiceIdx, tick))
+            return false
 
+        var orderedRows = __orderedValidRowsForNoteCount(noteCount)
+        var rowsToDelete = []
 
-    function __runVoicePassFromSourcePlan(staffIdx, startTick, endTick, passPlan, voiceIdx) {
+        for (var r = 0; r < orderedRows.length; ++r) {
+            var rowIndex = orderedRows[r]
+            var spec = rowsForVoice[String(rowIndex)]
+
+            if (!spec) {
+                rowsToDelete.push({
+                                      rowIndex: rowIndex,
+                                      originalPosition: r
+                                  })
+            }
+        }
+
+        for (var d = rowsToDelete.length - 1; d >= 0; --d) {
+            if (!__selectChordNoteAtTick(staffIdx, voiceIdx, tick))
+                continue
+
+            __doTopChord()
+
+            for (var ds = 0; ds < rowsToDelete[d].originalPosition; ++ds)
+                __doDownChord()
+
+            __doDelete()
+        }
+
+        return true
+    }
+
+    function __runVoicePassFromSourcePlan(staffIdx, startTick, endTick, passPlan, voiceIdx, cleanupTrailingContinuation) {
         if (!passPlan || !passPlan.length)
             return true
 
@@ -2545,54 +2634,86 @@ MuseScore {
             var rowsForVoice = entry.rowsForVoice || ({})
             var orderedRows = __orderedValidRowsForNoteCount(entry.noteCount)
 
-            // Normalize to top note of chord
-            __doTopChord()
+            // Split cleanup from pitching. Deleting while walking downward through a
+            // tied chord can change MuseScore's current note/chord selection, so do
+            // all deletions first, bottom-to-top, then reselect and pitch kept notes.
+            var rowsToDelete = []
+            var rowsToKeep = []
 
-            var keptCount = 0
             for (var r = 0; r < orderedRows.length; ++r) {
                 var rowIndex = orderedRows[r]
                 var spec = rowsForVoice[String(rowIndex)]
+                if (spec) {
+                    rowsToKeep.push({
+                                        rowIndex: rowIndex,
+                                        spec: spec
+                                    })
+                } else {
+                    rowsToDelete.push({
+                                          rowIndex: rowIndex,
+                                          originalPosition: r
+                                      })
+                }
+            }
 
-                // Step down inside the chord only when needed
-                if (keptCount > 0)
+            // Delete unused notes from bottom to top so earlier/topward positions
+            // remain stable while the chord shrinks.
+            for (var d = rowsToDelete.length - 1; d >= 0; --d) {
+                if (!__selectChordNoteAtTick(staffIdx, voiceIdx, entry.tick))
+                    continue
+
+                __doTopChord()
+
+                for (var ds = 0; ds < rowsToDelete[d].originalPosition; ++ds)
                     __doDownChord()
 
-                if (!spec) {
+                __doDelete()
+            }
 
-                    // Row not used for this voice — BUT never delete tied notes
+            // Reselect the cleaned chord before pitching. After deletions, the chord
+            // contains only the notes this voice should keep.
+            if (rowsToKeep.length > 0) {
+                if (!__selectChordNoteAtTick(staffIdx, voiceIdx, entry.tick)) {
+                    __doMoveRight()
+                    continue
+                }
+
+                __doTopChord()
+
+                for (var kRow = 0; kRow < rowsToKeep.length; ++kRow) {
+                    if (kRow > 0)
+                        __doDownChord()
+
+                    var keepSpec = rowsToKeep[kRow].spec
+
+                    // Pitch ONLY on tie starts. Tie continuations are kept but not repitched.
                     var els = curScore.selection.elements
                     var note = (els && els.length) ? els[0] : null
-
-                    if (note && (note.tieBack || note.tieForward)) {
-                        // Preserve tie chain integrity
-                        keptCount += 1
+                    if (note && note.tieBack)
                         continue
-                    }
 
-                    __doDelete()
-                    continue
+                    if (!keepSpec.skipPitch)
+                        __applyPitchOffsetCommands(keepSpec.offset)
                 }
-
-                // Pitch ONLY on tie starts
-                var els = curScore.selection.elements
-                var note = (els && els.length) ? els[0] : null
-
-                if (note && note.tieBack) {
-                    // This is a tie continuation — do NOT pitch it
-                    keptCount += 1
-                    continue
-                }
-
-                if (!spec.skipPitch)
-                    __applyPitchOffsetCommands(spec.offset)
-
-                keptCount += 1
             }
 
             // Advance to next chord/rest
             __doMoveRight()
-        }
 
+            // If this pass required a temporary trailing measure, the final move-right
+            // can land on a tie continuation at endTick. The main plan only includes
+            // source chords with ticks < endTick, so clean the continuation explicitly.
+            // Do not pitch here; this is delete-only cleanup for tied continuations.
+            if (cleanupTrailingContinuation && i === passPlan.length - 1) {
+                __cleanupChordAtTickNoPitch(
+                            staffIdx,
+                            voiceIdx,
+                            endTick,
+                            entry.noteCount,
+                            rowsForVoice
+                            )
+            }
+        }
         return true
     }
 
@@ -2861,12 +2982,29 @@ MuseScore {
         var warnings = []
         var started = false
         var committed = false
+        var addedEndSentinelMeasure = false
+        var copiedSourceBeforeSentinel = false
+
+        if (__selectionEndsAtScoreEnd(endTick)) {
+            // Important: copy BEFORE appending the temporary measure.
+            // Copying after append can serialize score-end ties/connectors differently,
+            // which has produced "unpaired connectors left" during paste.
+            __logInfo("firePreset: copying source before temporary trailing measure append endTick=" + endTick)
+            __doCopy()
+            copiedSourceBeforeSentinel = true
+
+            __logInfo("firePreset: appending temporary trailing measure outside main command endTick=" + endTick)
+            __doAppendMeasure()
+            addedEndSentinelMeasure = true
+        }
 
         try {
             curScore.startCmd()
             started = true
 
-            __doCopy()
+            if (!copiedSourceBeforeSentinel)
+                __doCopy()
+
             for (var t = 0; t < resolvedAssignments.length; ++t) {
                 var assignment = resolvedAssignments[t]
                 var staffIdx = Number(assignment.staffIdx)
@@ -2923,7 +3061,8 @@ MuseScore {
                                 startTick,
                                 endTick,
                                 passPlan,
-                                voiceIdx
+                                voiceIdx,
+                                addedEndSentinelMeasure
                                 )
                     if (!okPass) {
                         throw new Error(
@@ -2936,6 +3075,12 @@ MuseScore {
 
             curScore.endCmd()
             committed = true
+
+            if (addedEndSentinelMeasure) {
+                __logInfo("firePreset: removing temporary trailing measure outside main command")
+                __doDeleteEmptyMeasures()
+            }
+
             __showIgnoredRowWarnings(warnings)
             __showUnresolvedPresetTargetWarnings(p, targetInfo)
 
@@ -2951,6 +3096,10 @@ MuseScore {
                 } catch (eEnd) {}
 
                 __doUndoBestEffort()
+            }
+
+            if (addedEndSentinelMeasure) {
+                __logInfo("firePreset: skipped temporary trailing measure cleanup after rollback; undo should restore the pre-append state")
             }
 
             Interactive.info(
