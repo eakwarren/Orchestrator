@@ -52,6 +52,10 @@ MuseScore {
     function __logDebug(message) { if (__canLog("debug")) Log.debug(tag, String(message)) }
     function __logError(message) { Log.error(tag, String(message)) }  // always show errors
 
+    function __debugEnabled() {
+        return __canLog("debug")
+    }
+
     //--------------------------------------------------------------------------------
     // JSON Preset Array & UI Engine
     //--------------------------------------------------------------------------------
@@ -152,6 +156,9 @@ MuseScore {
 
     property int pitchOffsetMax: 36
     readonly property int pitchCenterIndex: pitchOffsetMax
+
+    property bool __skipRollbackUndoAfterUnsafeSplit: false
+    property string __splitVoiceSoftFailureMessage: ""
 
     // Pitch offset <-> dropdown index mapping (0..72, 36 == 0 semitones)
     function pitchValueToIndex(v) {
@@ -1865,6 +1872,8 @@ MuseScore {
     function __doDownChord()            { cmd("down-chord") }
     function __doTopChord()             { cmd("top-chord") }
     function __doBottomChord()          { cmd("bottom-chord") }
+    function __doNextTrack()            { cmd("next-track") }
+    function __doPrevTrack()            { cmd("prev-track") }
     function __doEscape()               { cmd("action://cancel") }
 
     function __clearScoreSelection() {
@@ -1909,6 +1918,12 @@ MuseScore {
     function __doSetVoice2()            { cmd("voice-2") }
     function __doSetVoice3()            { cmd("voice-3") }
     function __doSetVoice4()            { cmd("voice-4") }
+    function __doExchangeVoice12()      { cmd("voice-x12") }
+    function __doExchangeVoice13()      { cmd("voice-x13") }
+    function __doExchangeVoice14()      { cmd("voice-x14") }
+    function __doExchangeVoice23()      { cmd("voice-x23") }
+    function __doExchangeVoice24()      { cmd("voice-x24") }
+    function __doExchangeVoice34()      { cmd("voice-x34") }
 
     function __setVoice(v) {
         // API index: 0..3 (#track % 4)
@@ -1917,37 +1932,6 @@ MuseScore {
         if (vv > 3) vv = 3
         // convert API index to UI index 0..3 => 1..4
         cmd("voice-" + (vv + 1))
-    }
-
-    function __selectStaffRangeForVoiceChange(staffIdx, startTick, endTick) {
-        if (!curScore || !curScore.selection || !curScore.selection.selectRange)
-            return false
-
-        var st = Number(startTick ?? 0)
-        var et = Number(endTick ?? st)
-        var sid = Number(staffIdx)
-
-        if (isNaN(st) || isNaN(et) || isNaN(sid) || sid < 0)
-            return false
-
-        if (et <= st)
-            et = st + 1
-
-        try {
-            __clearScoreSelection()
-        } catch (e0) {}
-
-        try {
-            return !!curScore.selection.selectRange(st, et, sid, sid + 1)
-        } catch (e1) {
-            __logWarn(
-                        "__selectStaffRangeForVoiceChange failed staffIdx=" + sid +
-                        " startTick=" + st +
-                        " endTick=" + et +
-                        " error=" + String(e1)
-                        )
-            return false
-        }
     }
 
     function __verifyVoicePassMaterial(staffIdx, voiceIdx, passPlan) {
@@ -1974,9 +1958,14 @@ MuseScore {
 
     // --- Row labeling & diagnostics (UI / warnings only) ------------------------
     function __rowLabel(rowIndex) {
-        if (rowIndex === 0) return "T" // Top
-        if (rowIndex === 6) return "S" // Second
-        if (rowIndex === 7) return "B" // Bottom
+        if (rowIndex === 0) return "Top / Single note"
+        if (rowIndex === 1) return "Seventh note"
+        if (rowIndex === 2) return "Sixth note"
+        if (rowIndex === 3) return "Fifth note"
+        if (rowIndex === 4) return "Fourth note"
+        if (rowIndex === 5) return "Third note"
+        if (rowIndex === 6) return "Second note"
+        if (rowIndex === 7) return "Bottom note"
         return String(rowIndex)
     }
 
@@ -2040,10 +2029,7 @@ MuseScore {
             var names = []
             for (var j = 0; j < rowNums.length; ++j) {
                 var rowIndex = rowNums[j]
-                if (rowIndex === 0) names.push("Top / Single note")
-                else if (rowIndex === 6) names.push("Second note")
-                else if (rowIndex === 7) names.push("Bottom note")
-                else names.push(__rowLabel(rowIndex))
+                names.push(__rowLabel(rowIndex))
             }
 
             lines.push(
@@ -2108,7 +2094,7 @@ MuseScore {
         }
 
         // NEW: if we never encountered any track-bearing items, it's "no notes selected"
-        if (found === null) return -1
+        if (found === null) return 0
 
         return found
     }
@@ -2195,6 +2181,150 @@ MuseScore {
         return { start: startSeg, end: endSeg }
     }
 
+    function __tickFromSelectionElement(el) {
+        if (!el)
+            return null
+
+        try {
+            if (el.tick !== undefined && el.tick !== null)
+                return Number(el.tick)
+        } catch (e0) {}
+
+        try {
+            if (el.segment && el.segment.tick !== undefined && el.segment.tick !== null)
+                return Number(el.segment.tick)
+        } catch (e1) {}
+
+        try {
+            if (el.parent && el.parent.tick !== undefined && el.parent.tick !== null)
+                return Number(el.parent.tick)
+        } catch (e2) {}
+
+        try {
+            if (el.parent && el.parent.segment && el.parent.segment.tick !== undefined && el.parent.segment.tick !== null)
+                return Number(el.parent.segment.tick)
+        } catch (e3) {}
+
+        return null
+    }
+
+    function __durationTicksFromSelectionElement(el) {
+        if (!el)
+            return 0
+
+        var candidates = []
+
+        try { candidates.push(el) } catch (e0) {}
+        try { if (el.parent) candidates.push(el.parent) } catch (e1) {}
+
+        for (var i = 0; i < candidates.length; ++i) {
+            var obj = candidates[i]
+            if (!obj)
+                continue
+
+            try {
+                if (obj.actualTicks !== undefined && obj.actualTicks !== null)
+                    return Number(obj.actualTicks)
+            } catch (e2) {}
+
+            try {
+                if (obj.duration && obj.duration.ticks !== undefined && obj.duration.ticks !== null)
+                    return Number(obj.duration.ticks)
+            } catch (e3) {}
+
+            try {
+                if (obj.globalDuration && obj.globalDuration.ticks !== undefined && obj.globalDuration.ticks !== null)
+                    return Number(obj.globalDuration.ticks)
+            } catch (e4) {}
+        }
+
+        return 0
+    }
+
+    function __nextSegmentTickAfter(staffIdx, voiceIdx, tick) {
+        if (!curScore)
+            return null
+
+        var c = curScore.newCursor()
+        if (!c)
+            return null
+
+        try {
+            c.track = staffBaseTrack(staffIdx) + voiceIdx
+        } catch (e0) {}
+
+        if (!__seekCursorToTick(c, Number(tick)))
+            return null
+
+        try {
+            c.next()
+            if (c.segment && c.segment.tick !== undefined)
+                return Number(c.segment.tick)
+        } catch (e1) {}
+
+        return null
+    }
+
+    function __selectionTickRangeFromSelectedElements(staffIdx, voiceIdx) {
+        if (!curScore || !curScore.selection)
+            return null
+
+        var els = null
+        try {
+            els = curScore.selection.elements
+        } catch (e0) {
+            els = null
+        }
+
+        if (!els || !els.length)
+            return null
+
+        var minTick = null
+        var maxTick = null
+        var maxEndTick = null
+
+        for (var i = 0; i < els.length; ++i) {
+            var el = els[i]
+            var tick = __tickFromSelectionElement(el)
+
+            if (tick === null || isNaN(tick))
+                continue
+
+            var dur = __durationTicksFromSelectionElement(el)
+            if (isNaN(dur) || dur < 0)
+                dur = 0
+
+            var endTick = tick + dur
+
+            if (minTick === null || tick < minTick)
+                minTick = tick
+
+            if (maxTick === null || tick > maxTick)
+                maxTick = tick
+
+            if (maxEndTick === null || endTick > maxEndTick)
+                maxEndTick = endTick
+        }
+
+        if (minTick === null || maxTick === null)
+            return null
+
+        // If duration data was unavailable, use the segment after the last selected element.
+        if (maxEndTick === null || maxEndTick <= maxTick) {
+            var nextTick = __nextSegmentTickAfter(staffIdx, voiceIdx, maxTick)
+            if (nextTick !== null && nextTick > maxTick)
+                maxEndTick = nextTick
+        }
+
+        if (maxEndTick === null || maxEndTick <= minTick)
+            return null
+
+        return {
+            startTick: minTick,
+            endTick: maxEndTick
+        }
+    }
+
     function __seekCursorToTick(c, targetTick) {
         if (!c) return false
 
@@ -2242,6 +2372,8 @@ MuseScore {
             return false
 
         try {
+            __clearScoreSelection()
+
             if (el.type === Element.CHORD && el.notes && el.notes.length)
                 curScore.selection.select(el.notes[0])
             else
@@ -2269,6 +2401,7 @@ MuseScore {
             return false
 
         try {
+            __clearScoreSelection()
             curScore.selection.select(el.notes[0])
             return true
         } catch (e) {
@@ -2276,111 +2409,8 @@ MuseScore {
         }
     }
 
-    function __selectChordRowPositionAtTick(staffIdx, voiceIdx, tick, rowPosition) {
-        if (!__selectChordNoteAtTick(staffIdx, voiceIdx, tick))
-            return false
-
-        __doTopChord()
-
-        var pos = Number(rowPosition ?? 0)
-        if (isNaN(pos) || pos < 0)
-            pos = 0
-
-        for (var i = 0; i < pos; ++i)
-            __doDownChord()
-
-        return true
-    }
-
-    function __deleteAllNotesAtTickForVoice(staffIdx, voiceIdx, tick) {
-        var guard = 0
-        while (__selectChordNoteAtTick(staffIdx, voiceIdx, tick) && guard < 32) {
-            __doDelete()
-            guard++
-        }
-        return guard
-    }
-
-    function __runSparseVoicePassFromSourcePlan(staffIdx, passPlan, voiceIdx) {
-        if (!passPlan || !passPlan.length)
-            return true
-
-        for (var i = 0; i < passPlan.length; ++i) {
-            var entry = passPlan[i]
-            if (!entry || entry.tick === undefined)
-                continue
-
-            var rowsForVoice = entry.rowsForVoice || ({})
-            var orderedRows = __orderedValidRowsForNoteCount(entry.noteCount)
-            var rowsToMove = []
-
-            for (var r = 0; r < orderedRows.length; ++r) {
-                var rowIndex = orderedRows[r]
-                var spec = rowsForVoice[String(rowIndex)]
-                if (spec) {
-                    rowsToMove.push({
-                                        rowIndex: rowIndex,
-                                        originalPosition: r,
-                                        spec: spec
-                                    })
-                }
-            }
-
-            if (!rowsToMove.length) {
-                __deleteAllNotesAtTickForVoice(staffIdx, 0, entry.tick)
-                continue
-            }
-
-            // Move selected notes from the freshly pasted Voice 1 material into target voice.
-            // Move bottom-to-top so deleting/moving lower notes does not disturb earlier positions.
-            for (var m = rowsToMove.length - 1; m >= 0; --m) {
-                var mv = rowsToMove[m]
-                if (!__selectChordRowPositionAtTick(staffIdx, 0, entry.tick, mv.originalPosition)) {
-                    __logWarn(
-                                "sparseVoicePass: source row not selectable before voice change staffIdx=" +
-                                staffIdx + " targetVoice=" + voiceIdx + " tick=" + entry.tick +
-                                " rowIndex=" + mv.rowIndex
-                                )
-                    continue
-                }
-
-                __setVoice(voiceIdx)
-            }
-
-            // Delete any notes left in Voice 1 from this temporary paste.
-            __deleteAllNotesAtTickForVoice(staffIdx, 0, entry.tick)
-
-            // Apply pitch offsets to the moved notes in target voice, top-to-bottom.
-            rowsToMove.sort(function(a, b) { return a.rowIndex - b.rowIndex })
-
-            for (var p = 0; p < rowsToMove.length; ++p) {
-                if (!__selectChordRowPositionAtTick(staffIdx, voiceIdx, entry.tick, p)) {
-                    __logWarn(
-                                "sparseVoicePass: moved target note not selectable staffIdx=" +
-                                staffIdx + " voice=" + voiceIdx + " tick=" + entry.tick +
-                                " movedPosition=" + p
-                                )
-                    continue
-                }
-
-                var keepSpec = rowsToMove[p].spec
-                var els = curScore.selection.elements
-                var note = (els && els.length) ? els[0] : null
-                if (note && note.tieBack)
-                    continue
-
-                if (!keepSpec.skipPitch)
-                    __applyPitchOffsetCommands(keepSpec.offset)
-            }
-        }
-
-        return true
-    }
-
-    function __selectChordAtTick(staffIdx, voiceIdx, tick) {
-        if (!curScore ||
-                tick === undefined ||
-                tick === null)
+    function __selectVoiceElementAtTick(staffIdx, voiceIdx, tick) {
+        if (!curScore || tick === undefined || tick === null)
             return false
 
         var c = curScore.newCursor()
@@ -2388,21 +2418,124 @@ MuseScore {
             return false
 
         c.track = staffBaseTrack(staffIdx) + voiceIdx
-
         if (!__seekCursorToTick(c, tick))
             return false
 
+        if (!c.segment || c.segment.tick === undefined || Number(c.segment.tick) !== Number(tick))
+            return false
+
         var el = c.element
-        if (!el ||
-                !el.notes ||
-                !el.notes.length)
+        if (!el)
             return false
 
         try {
-            curScore.selection.select(el)
+            __clearScoreSelection()
+
+            if (el.type === Element.CHORD && el.notes && el.notes.length) {
+                curScore.selection.select(el.notes[0])
+            } else {
+                curScore.selection.select(el)
+            }
+
             return true
         } catch (e) {
             return false
+        }
+    }
+
+    function __measureStartTickForVoiceElementAtTick(staffIdx, voiceIdx, tick) {
+        if (!curScore || tick === undefined || tick === null)
+            return Number(tick || 0)
+
+        var c = curScore.newCursor()
+        if (!c)
+            return Number(tick || 0)
+
+        c.track = staffBaseTrack(staffIdx) + voiceIdx
+        if (!__seekCursorToTick(c, tick))
+            return Number(tick || 0)
+
+        var el = c.element
+        var candidates = []
+
+        try { if (el) candidates.push(el) } catch (e0) {}
+        try { if (el && el.parent) candidates.push(el.parent) } catch (e1) {}
+        try { if (el && el.parent && el.parent.parent) candidates.push(el.parent.parent) } catch (e2) {}
+        try { if (c.segment) candidates.push(c.segment) } catch (e3) {}
+        try { if (c.segment && c.segment.measure) candidates.push(c.segment.measure) } catch (e4) {}
+
+        for (var i = 0; i < candidates.length; ++i) {
+            var obj = candidates[i]
+            if (!obj)
+                continue
+
+            try {
+                if (obj.measure && obj.measure.tick !== undefined)
+                    return Number(obj.measure.tick)
+            } catch (e5) {}
+
+            try {
+                if (obj.tick !== undefined && obj.type !== Element.CHORD)
+                    return Number(obj.tick)
+            } catch (e6) {}
+        }
+
+        return Number(tick || 0)
+    }
+
+    function __logSelectionShape(label) {
+        if (!__debugEnabled())
+            return
+
+        var els = null
+        try {
+            els = curScore && curScore.selection ? curScore.selection.elements : null
+        } catch (e0) {
+            els = null
+        }
+
+        var count = els && els.length ? els.length : 0
+        var parts = []
+
+        for (var i = 0; i < count && i < 8; ++i) {
+            var el = els[i]
+            var typeVal = "?"
+            var trackVal = "?"
+            var notesVal = "-"
+
+            try { typeVal = String(el && el.type !== undefined ? el.type : "?") } catch (e1) {}
+            try { trackVal = String(el && el.track !== undefined ? el.track : "?") } catch (e2) {}
+            try { notesVal = String(el && el.notes && el.notes.length !== undefined ? el.notes.length : "-") } catch (e3) {}
+
+            parts.push("{type=" + typeVal + ",track=" + trackVal + ",notes=" + notesVal + "}")
+        }
+
+        __logDebug("selectionShape " + String(label) + " count=" + count + " " + parts.join(" "))
+    }
+
+    function __logVoicePassMaterialProbe(label, staffIdx, voiceIdx, passPlan) {
+        if (!__debugEnabled())
+            return
+
+        if (!passPlan || !passPlan.length)
+            return
+
+        for (var i = 0; i < passPlan.length; ++i) {
+            var entry = passPlan[i]
+            if (!entry || entry.tick === undefined)
+                continue
+
+            var ok = __selectChordNoteAtTick(staffIdx, voiceIdx, entry.tick)
+            __logDebug(
+                        String(label) +
+                        " staffIdx=" + staffIdx +
+                        " voice=" + voiceIdx +
+                        " tick=" + entry.tick +
+                        " selectable=" + ok
+                        )
+
+            if (ok)
+                __logSelectionShape(String(label) + " selected tick=" + entry.tick + " voiceIdx=" + voiceIdx)
         }
     }
 
@@ -2536,6 +2669,21 @@ MuseScore {
         })
 
         return true
+    }
+
+    function __restoreEndTickForSelection(endTick) {
+        var et = Number(endTick)
+        if (isNaN(et))
+            return endTick
+
+        // If the selection ends exactly at score end, MuseScore may not include the
+        // terminal rest when restoring with selectRange(start, end). Padding only the
+        // restore end tick keeps source analysis unchanged but lets the restored
+        // range include the final rest.
+        if (!__scoreHasSegmentAtOrAfterTick(et))
+            return et + 1
+
+        return et
     }
 
     // --- Overwrite modal helpers ------------------------------------------------
@@ -2752,6 +2900,137 @@ MuseScore {
         return out
     }
 
+    function __emptyPassPlanForVoice(sourcePlan, voiceIdx) {
+        var out = []
+        if (!sourcePlan || !sourcePlan.length)
+            return out
+
+        for (var i = 0; i < sourcePlan.length; ++i) {
+            var entry = sourcePlan[i]
+            if (!entry || entry.tick === undefined)
+                continue
+
+            var rowsForVoice = entry.rowsByVoice[voiceIdx] || ({})
+            var hasRows = false
+
+            for (var k in rowsForVoice) {
+                if (rowsForVoice.hasOwnProperty(k)) {
+                    hasRows = true
+                    break
+                }
+            }
+
+            if (!hasRows) {
+                out.push({
+                             tick: entry.tick,
+                             noteCount: entry.noteCount
+                         })
+            }
+        }
+
+        return out
+    }
+
+    function __deleteVoiceMaterialAtTick(staffIdx, voiceIdx, tick) {
+        var deletedAny = false
+
+        // First delete note/chord material if present.
+        if (__selectChordNoteAtTick(staffIdx, voiceIdx, tick)) {
+            try {
+                __doDelete()
+                deletedAny = true
+            } catch (e0) {
+                __logWarn(
+                            "__deleteVoiceMaterialAtTick note delete failed staffIdx=" +
+                            staffIdx + " voice=" + voiceIdx + " tick=" + tick +
+                            " error=" + String(e0)
+                            )
+            }
+        }
+
+        // Deleting secondary-voice notes often leaves explicit voice rests.
+        // Select/delete generic voice elements at the same tick to clear those rests.
+        var guard = 0
+        while (guard < 4 && __selectVoiceElementAtTick(staffIdx, voiceIdx, tick)) {
+            try {
+                __doDelete()
+                deletedAny = true
+            } catch (e1) {
+                __logWarn(
+                            "__deleteVoiceMaterialAtTick rest delete failed staffIdx=" +
+                            staffIdx + " voice=" + voiceIdx + " tick=" + tick +
+                            " error=" + String(e1)
+                            )
+                break
+            }
+
+            guard++
+        }
+
+        return deletedAny
+    }
+
+    function __deleteEmptyVoiceMaterialBeforeTickInMeasure(staffIdx, voiceIdx, tick) {
+        var targetTick = Number(tick)
+        if (isNaN(targetTick))
+            return false
+
+        var startTick = __measureStartTickForVoiceElementAtTick(staffIdx, voiceIdx, targetTick)
+        startTick = Number(startTick)
+        if (isNaN(startTick) || startTick > targetTick)
+            startTick = targetTick
+
+        var deletedAny = false
+        var c = curScore ? curScore.newCursor() : null
+        if (!c)
+            return false
+
+        c.track = staffBaseTrack(staffIdx) + voiceIdx
+        if (!__seekCursorToTick(c, startTick))
+            return false
+
+        var guard = 0
+        while (c.segment && c.segment.tick !== undefined && Number(c.segment.tick) <= targetTick && guard < 2000) {
+            var curTick = Number(c.segment.tick)
+
+            // Only delete ticks before the ignored chord tick here.
+            // The ignored chord tick itself is handled by __deleteVoiceMaterialAtTick().
+            if (curTick < targetTick) {
+                var innerGuard = 0
+
+                while (innerGuard < 4 && __selectVoiceElementAtTick(staffIdx, voiceIdx, curTick)) {
+                    try {
+                        __doDelete()
+                        deletedAny = true
+                    } catch (e0) {
+                        __logWarn(
+                                    "__deleteEmptyVoiceMaterialBeforeTickInMeasure failed staffIdx=" +
+                                    staffIdx + " voice=" + voiceIdx + " tick=" + curTick +
+                                    " error=" + String(e0)
+                                    )
+                        break
+                    }
+
+                    innerGuard++
+                }
+            }
+
+            // Rebuild cursor after mutation; MuseScore command deletes can invalidate cursor state.
+            c = curScore ? curScore.newCursor() : null
+            if (!c)
+                break
+
+            c.track = staffBaseTrack(staffIdx) + voiceIdx
+            if (!__seekCursorToTick(c, curTick))
+                break
+
+            try { c.next() } catch (e1) { break }
+            guard++
+        }
+
+        return deletedAny
+    }
+
     function __cleanupChordAtTickNoPitch(staffIdx, voiceIdx, tick, noteCount, rowsForVoice) {
         if (!__selectChordNoteAtTick(staffIdx, voiceIdx, tick))
             return false
@@ -2771,9 +3050,45 @@ MuseScore {
             }
         }
 
+        var remaining = orderedRows.length
+
         for (var d = rowsToDelete.length - 1; d >= 0; --d) {
+            if (remaining <= 1)
+                break
+
             if (!__selectChordNoteAtTick(staffIdx, voiceIdx, tick))
                 continue
+
+            __doTopChord()
+            for (var ds = 0; ds < rowsToDelete[d].originalPosition; ++ds)
+                __doDownChord()
+
+            __doDelete()
+            remaining--
+        }
+
+        return true
+    }
+
+    function __cleanupCurrentChordNoPitch(noteCount, rowsForVoice) {
+        var orderedRows = __orderedValidRowsForNoteCount(noteCount)
+        var rowsToDelete = []
+
+        for (var r = 0; r < orderedRows.length; ++r) {
+            var rowIndex = orderedRows[r]
+            var spec = rowsForVoice[String(rowIndex)]
+            if (!spec) {
+                rowsToDelete.push({
+                                      rowIndex: rowIndex,
+                                      originalPosition: r
+                                  })
+            }
+        }
+
+        var remaining = orderedRows.length
+        for (var d = rowsToDelete.length - 1; d >= 0; --d) {
+            if (remaining <= 1)
+                break
 
             __doTopChord()
 
@@ -2781,12 +3096,91 @@ MuseScore {
                 __doDownChord()
 
             __doDelete()
+            remaining--
         }
 
         return true
     }
 
-    function __runVoicePassFromSourcePlan(staffIdx, startTick, endTick, passPlan, voiceIdx, cleanupTrailingContinuation) {
+    function __cleanupAndPitchChordAtTick(staffIdx, voiceIdx, tick, noteCount, rowsForVoice) {
+        if (!__selectChordNoteAtTick(staffIdx, voiceIdx, tick))
+            return false
+
+        var orderedRows = __orderedValidRowsForNoteCount(noteCount)
+        var rowsToDelete = []
+        var rowsToKeep = []
+
+        for (var r = 0; r < orderedRows.length; ++r) {
+            var rowIndex = orderedRows[r]
+            var spec = rowsForVoice[String(rowIndex)]
+
+            if (spec) {
+                rowsToKeep.push({
+                                    rowIndex: rowIndex,
+                                    spec: spec
+                                })
+            } else {
+                rowsToDelete.push({
+                                      rowIndex: rowIndex,
+                                      originalPosition: r
+                                  })
+            }
+        }
+
+        var remaining = orderedRows.length
+
+        for (var d = rowsToDelete.length - 1; d >= 0; --d) {
+            if (remaining <= 1)
+                break
+
+            if (!__selectChordNoteAtTick(staffIdx, voiceIdx, tick))
+                continue
+
+            __doTopChord()
+            for (var ds = 0; ds < rowsToDelete[d].originalPosition; ++ds)
+                __doDownChord()
+
+            __doDelete()
+            remaining--
+        }
+
+        if (rowsToKeep.length > 0) {
+            if (!__selectChordNoteAtTick(staffIdx, voiceIdx, tick))
+                return false
+
+            __doTopChord()
+
+            for (var kRow = 0; kRow < rowsToKeep.length; ++kRow) {
+                if (kRow > 0)
+                    __doDownChord()
+
+                var keepSpec = rowsToKeep[kRow].spec
+
+                var els = null
+                var note = null
+                try {
+                    els = curScore && curScore.selection ? curScore.selection.elements : null
+                    note = (els && els.length) ? els[0] : null
+                } catch (eNote) {
+                    note = null
+                }
+
+                // Ensure we actually have a valid NOTE object
+                if (!note || note.pitch === undefined)
+                    continue
+
+                if (note.tieBack)
+                    continue
+
+                if (!keepSpec.skipPitch)
+                    __applyPitchOffsetCommands(keepSpec.offset)
+            }
+        }
+
+        return true
+    }
+
+    function __runVoicePassFromSourcePlan(staffIdx, startTick, endTick, passPlan, voiceIdx, cleanupTrailingContinuation, emptyPassPlan) {
         if (!passPlan || !passPlan.length)
             return true
 
@@ -2797,20 +3191,122 @@ MuseScore {
         // 2) Paste once. Pasted material initially lands in Voice 1.
         __doPaste()
 
-        // 3) For non-Voice-1 passes, move only the requested note rows into the target
-        // voice. MuseScore does not allow plugin selection of Chord elements directly,
-        // so do not use __selectChordAtTick() here.
-        if (voiceIdx !== 0)
-            return __runSparseVoicePassFromSourcePlan(staffIdx, passPlan, voiceIdx)
+        if (voiceIdx !== 0) {
+            __logSelectionShape("splitPasteVoice after paste before pasteEndCmd voiceIdx=" + voiceIdx)
 
-        // 4) Walk left to collapse range selection to first chord/note
-        // The later processing still explicitly reselects by tick, so this is only
-        // retained for compatibility with the existing command workflow.
-        var stepsLeft = passPlan.length - 1
-        for (var k = 0; k < stepsLeft; ++k)
-            __doMoveLeft()
+            root.__skipRollbackUndoAfterUnsafeSplit = true
 
-        // 5) Process each chord independently
+            try {
+                // Preserve MuseScore's pasted selection for voice-x.
+                // Do not reselect an anchor here; that collapses the pasted range
+                // before voice-x12 / voice-x13 / voice-x14 can act on it.
+                __logInfo(
+                            "splitPasteVoice preserving pasted selection for voice exchange (no endCmd) " +
+                            "staffIdx=" + staffIdx +
+                            " voiceIdx=" + voiceIdx
+                            )
+            } catch (ePasteEnd) {
+                __splitVoiceSoftFailureMessage = "splitPasteVoice paste selection preservation failed: " + String(ePasteEnd)
+                __logWarn(__splitVoiceSoftFailureMessage)
+                return true
+            }
+
+            try {
+                __logInfo(
+                            "splitPasteVoice continuing voice assignment (no new command) " +
+                            "staffIdx=" + staffIdx +
+                            " voiceIdx=" + voiceIdx
+                            )
+            } catch (eVoiceStart) {
+                __splitVoiceSoftFailureMessage = "splitPasteVoice voice startCmd failed: " + String(eVoiceStart)
+                __logWarn(__splitVoiceSoftFailureMessage)
+                return true
+            }
+
+            __logSelectionShape("splitPasteVoice before setVoice after paste commit voiceIdx=" + voiceIdx)
+
+            // 3) Exchange voice
+            if (voiceIdx === 0) {
+                // Voice 1: do nothing — paste already in v1
+            } else if (voiceIdx === 1) {
+                __doExchangeVoice12()
+            } else if (voiceIdx === 2) {
+                __doExchangeVoice13()
+            } else if (voiceIdx === 3) {
+                __doExchangeVoice14()
+            }
+
+            __logSelectionShape("splitPasteVoice after voice-x before next-track voiceIdx=" + voiceIdx)
+
+            // Stay in MuseScore's command-selection lifecycle.
+            // With the pasted/exchanged selection still active, next-track moves
+            // to the top-left note of the exchanged voice, matching the manual run.
+            __doNextTrack()
+            __logSelectionShape("splitPasteVoice after next-track voiceIdx=" + voiceIdx)
+
+            // The voice exchange acts on the whole pasted source selection. For rows that
+            // are invalid on a source chord, such as Bottom row on a single-note chord,
+            // there is no passPlan entry for this voice. Delete those exchanged leftovers
+            // before processing the valid ticks, otherwise single-note bars remain doubled
+            // into voice 2+.
+            //
+            // Known edge case: MuseScore may regenerate a visible secondary-voice rest at
+            // the beginning of a measure after the unwanted voice material is deleted.
+            // We intentionally do not hide that rest here. Hiding would fix appearance but
+            // leave invisible stateful score objects behind, which is too much engine risk
+            // for a rare cleanup artifact. Prefer structural deletion only.
+            if (emptyPassPlan && emptyPassPlan.length) {
+                for (var ep = 0; ep < emptyPassPlan.length; ++ep) {
+                    var emptyEntry = emptyPassPlan[ep]
+                    if (!emptyEntry || emptyEntry.tick === undefined)
+                        continue
+
+                    var deletedLeadIn = __deleteEmptyVoiceMaterialBeforeTickInMeasure(
+                                staffIdx,
+                                voiceIdx,
+                                emptyEntry.tick
+                                )
+
+                    var deletedEmpty = __deleteVoiceMaterialAtTick(
+                                staffIdx,
+                                voiceIdx,
+                                emptyEntry.tick
+                                )
+
+                    if (!deletedLeadIn && !deletedEmpty) {
+                        __logDebug(
+                                    "emptyVoiceCleanup no material selected staffIdx=" +
+                                    staffIdx + " voice=" + voiceIdx +
+                                    " tick=" + emptyEntry.tick
+                                    )
+                    }
+                }
+            }
+
+            // Process each pasted/exchanged chord by explicit tick selection.
+            // Avoid command-navigation at score end; __cleanupAndPitchChordAtTick()
+            // reselects the target chord by tick, so move-left/move-right is unnecessary.
+            for (var nz = 0; nz < passPlan.length; ++nz) {
+                var nzEntry = passPlan[nz]
+                if (!nzEntry || nzEntry.tick === undefined)
+                    continue
+
+                __cleanupAndPitchChordAtTick(
+                            staffIdx,
+                            voiceIdx,
+                            nzEntry.tick,
+                            nzEntry.noteCount,
+                            nzEntry.rowsForVoice || ({})
+                            )
+            }
+
+            __clearScoreSelection()
+            return true
+        }
+
+        // 4) Process each chord independently by explicit tick selection.
+        // Do not command-walk left/right through the pasted range; fresh-open,
+        // last-bar selections can crash MuseScore when navigation reaches score end.
         for (var i = 0; i < passPlan.length; ++i) {
             var entry = passPlan[i]
             if (!entry || entry.tick === undefined)
@@ -2821,7 +3317,6 @@ MuseScore {
                             "voicePass: target voice chord not selectable staffIdx=" +
                             staffIdx + " voice=" + voiceIdx + " tick=" + entry.tick
                             )
-                __doMoveRight()
                 continue
             }
 
@@ -2868,7 +3363,6 @@ MuseScore {
             // contains only the notes this voice should keep.
             if (rowsToKeep.length > 0) {
                 if (!__selectChordNoteAtTick(staffIdx, voiceIdx, entry.tick)) {
-                    __doMoveRight()
                     continue
                 }
 
@@ -2891,13 +3385,9 @@ MuseScore {
                 }
             }
 
-            // Advance to next chord/rest
-            __doMoveRight()
-
-            // If this pass required a temporary trailing measure, the final move-right
-            // can land on a tie continuation at endTick. The main plan only includes
-            // source chords with ticks < endTick, so clean the continuation explicitly.
-            // Do not pitch here; this is delete-only cleanup for tied continuations.
+            // No command-navigation advance here. The next loop iteration reselects by tick.
+            // The old trailing-continuation cleanup only applied to the removed sentinel-bar
+            // workflow, so it remains disabled unless that workflow is intentionally restored.
             if (cleanupTrailingContinuation && i === passPlan.length - 1) {
                 __cleanupChordAtTickNoPitch(
                             staffIdx,
@@ -3054,8 +3544,56 @@ MuseScore {
         });
     }
 
+    function __preflightExecutableVoicePassesForAssignments(assignments, sourceStaffIdx, startTick, endTick) {
+        var result = {
+            count: 0,
+            warnings: []
+        }
+
+        if (!assignments || !assignments.length)
+            return result
+
+        for (var pfT = 0; pfT < assignments.length; ++pfT) {
+            var pfAssignment = assignments[pfT]
+            if (!pfAssignment)
+                continue
+
+            var pfRows = pfAssignment.rows || []
+            if (!pfRows || !hasAnyActiveRows(pfRows))
+                continue
+
+            var warningBase = result.warnings.length
+
+            var pfSourcePlan = __buildSourceChordPlan(
+                        sourceStaffIdx,
+                        startTick,
+                        endTick,
+                        pfRows,
+                        result.warnings
+                        )
+
+            // Re-tag preflight warnings to the destination staff, matching the
+            // main firePreset warning behavior.
+            for (var w = warningBase; w < result.warnings.length; ++w) {
+                result.warnings[w].staffIdx = Number(pfAssignment.staffIdx)
+            }
+
+            var pfVoices = __voicesUsedByRows(pfRows)
+            for (var pfV = 0; pfV < pfVoices.length; ++pfV) {
+                if (__passPlanForVoice(pfSourcePlan, pfVoices[pfV]).length > 0)
+                    result.count++
+            }
+        }
+
+        return result
+    }
+
     function firePreset(presetIndex, opts) {
         opts = opts || {}
+
+        root.__skipRollbackUndoAfterUnsafeSplit = false
+        root.__splitVoiceSoftFailureMessage = ""
+
         if (!curScore) {
             __logError("firePreset: no curScore")
             return
@@ -3126,8 +3664,20 @@ MuseScore {
             return
         }
 
-        var startTick = (startSeg.tick !== undefined) ? startSeg.tick : 0
-        var endTick = (endSeg && endSeg.tick !== undefined) ? endSeg.tick : startTick
+        var startTick = (startSeg.tick !== undefined) ? Number(startSeg.tick) : 0
+        var endTick = (endSeg && endSeg.tick !== undefined) ? Number(endSeg.tick) : startTick
+
+        // Last-bar / multi-note selection fallback:
+        // Cursor.SELECTION_END can collapse to the first selected beat in some final-bar cases.
+        // If selected elements prove a wider range, trust them.
+        var selectedElementRange = __selectionTickRangeFromSelectedElements(sourceStaffIdx, selVoice)
+        if (selectedElementRange) {
+            if (selectedElementRange.startTick < startTick)
+                startTick = selectedElementRange.startTick
+
+            if (selectedElementRange.endTick > endTick)
+                endTick = selectedElementRange.endTick
+        }
 
         rebuildActiveScoreRegistry(startTick)
 
@@ -3151,7 +3701,35 @@ MuseScore {
             return
         }
 
-        var selectionSnapshot = __snapshotSourceSelectionForRestore()
+        var preflight = __preflightExecutableVoicePassesForAssignments(
+                    resolvedAssignments,
+                    sourceStaffIdx,
+                    startTick,
+                    endTick
+                    )
+
+        if (preflight.count <= 0) {
+            __logWarn("firePreset: no executable voice passes for selected source material")
+
+            if (preflight.warnings && preflight.warnings.length) {
+                __showIgnoredRowWarnings(preflight.warnings)
+            } else {
+                Interactive.info(
+                            qsTr("No matching source notes."),
+                            qsTr("The selected source material does not contain notes for the requested preset rows."),
+                            [qsTr("Ok")]
+                            )
+            }
+
+            return
+        }
+
+        var selectionSnapshot = {
+            startTick: startTick,
+            endTick: __restoreEndTickForSelection(endTick),
+            startStaff: sourceStaffIdx,
+            endStaff: sourceStaffIdx + 1
+        }
         var skipOverwritePrompt = !!opts.skipOverwritePrompt
         if (!skipOverwritePrompt) {
             var overwriteStaffIds = __detectOverwriteStaffIds(targetStaffIds, startTick, endTick)
@@ -3176,28 +3754,14 @@ MuseScore {
         var warnings = []
         var started = false
         var committed = false
-        var addedEndSentinelMeasure = false
-        var copiedSourceBeforeSentinel = false
-
-        if (__selectionEndsAtScoreEnd(endTick)) {
-            // Important: copy BEFORE appending the temporary measure.
-            // Copying after append can serialize score-end ties/connectors differently,
-            // which has produced "unpaired connectors left" during paste.
-            __logInfo("firePreset: copying source before temporary trailing measure append endTick=" + endTick)
-            __doCopy()
-            copiedSourceBeforeSentinel = true
-
-            __logInfo("firePreset: appending temporary trailing measure outside main command endTick=" + endTick)
-            __doAppendMeasure()
-            addedEndSentinelMeasure = true
-        }
 
         try {
-            curScore.startCmd()
-            started = true
+            // Command-driven mode:
+            // Do NOT wrap paste / voice-x / navigation / delete inside one plugin macro.
+            // MuseScore command actions must commit normally, matching manual command mode.
+            started = false
 
-            if (!copiedSourceBeforeSentinel)
-                __doCopy()
+            __doCopy()
 
             for (var t = 0; t < resolvedAssignments.length; ++t) {
                 var assignment = resolvedAssignments[t]
@@ -3235,6 +3799,8 @@ MuseScore {
                 for (var vI = 0; vI < voices.length; ++vI) {
                     var voiceIdx = voices[vI]
                     var passPlan = __passPlanForVoice(sourcePlan, voiceIdx)
+                    var emptyPassPlan = __emptyPassPlanForVoice(sourcePlan, voiceIdx)
+
                     if (!passPlan.length) {
                         __logInfo(
                                     "voicePass skipped staffIdx=" + staffIdx +
@@ -3247,7 +3813,8 @@ MuseScore {
                     __logDebug(
                                 "voicePass staffIdx=" + staffIdx +
                                 " voice=" + voiceIdx +
-                                " tickCount=" + passPlan.length
+                                " tickCount=" + passPlan.length +
+                                " emptyTickCount=" + emptyPassPlan.length
                                 )
 
                     var okPass = __runVoicePassFromSourcePlan(
@@ -3256,7 +3823,8 @@ MuseScore {
                                 endTick,
                                 passPlan,
                                 voiceIdx,
-                                addedEndSentinelMeasure
+                                false,
+                                emptyPassPlan
                                 )
                     if (!okPass) {
                         throw new Error(
@@ -3267,20 +3835,25 @@ MuseScore {
                 }
             }
 
-            curScore.endCmd()
             committed = true
-
-            if (addedEndSentinelMeasure) {
-                __logInfo("firePreset: removing temporary trailing measure outside main command")
-                __doDeleteEmptyMeasures()
-            }
 
             __showIgnoredRowWarnings(warnings)
             __showUnresolvedPresetTargetWarnings(p, targetInfo)
 
+            if (root.__splitVoiceSoftFailureMessage.length) {
+                Interactive.info(
+                            qsTr("Preset applied with warnings."),
+                            root.__splitVoiceSoftFailureMessage,
+                            [qsTr("Ok")]
+                            )
+            }
+
             if (!__restoreSelection(selectionSnapshot)) {
                 __logWarn("firePreset: could not schedule original selection restore after success")
             }
+
+            root.__skipRollbackUndoAfterUnsafeSplit = false
+            root.__splitVoiceSoftFailureMessage = ""
         } catch (e) {
             __logError("firePreset exception: " + String(e))
 
@@ -3290,10 +3863,8 @@ MuseScore {
                 } catch (eEnd) {}
 
                 __doUndoBestEffort()
-            }
-
-            if (addedEndSentinelMeasure) {
-                __logInfo("firePreset: skipped temporary trailing measure cleanup after rollback; undo should restore the pre-append state")
+            } else if (!committed) {
+                __logWarn("firePreset rollback: command-driven mode has no enclosing macro; partial command undo not attempted")
             }
 
             Interactive.info(
@@ -3304,6 +3875,9 @@ MuseScore {
             if (!__restoreSelection(selectionSnapshot)) {
                 __logWarn("firePreset: could not schedule original selection restore after rollback")
             }
+
+            root.__skipRollbackUndoAfterUnsafeSplit = false
+            root.__splitVoiceSoftFailureMessage = ""
         }
     }
 
@@ -4633,11 +5207,11 @@ MuseScore {
                         if (rootUI.selectedIndex >= 0 && rootUI.selectedIndex < allPresetsModel.count) {
                             const n = allPresetsModel.get(rootUI.selectedIndex).name;
                             confirmDeleteComponent.createObject(parentObj, {
-                                                                              presetIndex: rootUI.selectedIndex,
-                                                                              deleteAll: false,
-                                                                              titleText: qsTr("Delete preset?"),
-                                                                              messageText: qsTr("Do you really want to delete %1?").arg(n)
-                                                                          });
+                                                                    presetIndex: rootUI.selectedIndex,
+                                                                    deleteAll: false,
+                                                                    titleText: qsTr("Delete preset?"),
+                                                                    messageText: qsTr("Do you really want to delete %1?").arg(n)
+                                                                });
                         }
                     }
                 }
