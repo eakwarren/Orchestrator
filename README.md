@@ -3,14 +3,6 @@ A preset system to quickly orchestrate sketches in MuseScore Studio 4.7+
 
 https://github.com/user-attachments/assets/419d59cd-750a-4cd0-93bd-b69cb6eb9e18
 
-Developed with ❤️ by Eric Warren
-  
-> [!CAUTION]
-> The MuseScore 4.7 betas are considered stable, but there may be bugs which affect Orchestrator. Once MuseScore 4.7 is officially released, I'll address any issues.
-
-
-
-
 
 ## Setup
 1. Download the latest release from the panel on the right. Unzip to your MuseScore Plugins directory. (Documents/MuseScore4/Plugins)
@@ -33,13 +25,13 @@ Developed with ❤️ by Eric Warren
 
    
 > [!TIP]
-> Select multiple instruments with Cmd/Ctrl+click to quickly assign them to the same note.
+> Select multiple instruments with Cmd/Ctrl+click to quickly assign them to the same chord note.
 
 4. Close the Settings panel. Each preset card includes the preset name, number of chord notes, and a list of instruments with any pitch offsets.
 
-   Use the Filter to search for a preset or instrument. Use @color (red, orange, yellow, green, blue, purple or magenta) to filter by preset color, or @n (1-8) to filter by number of notes shown on the top right of a preset. For example, `violoncellos @orange @3`
+   Use the Filter to search for a preset or instrument. Use @color (red, orange, yellow, green, blue, purple or magenta) to filter by preset color, or @n (1-8) to filter by number of chord notes shown on the top right of a preset. For example, violoncellos @orange @3.
 
-   Open or Save preset collections with the folder button. Select different views with the lines button.
+   Open or Save preset collections with the folder button. Select different views with the display button.
 
    <img width="300" height="514" alt="plugin_window" src="https://github.com/user-attachments/assets/d8ce62f2-725d-4bfe-bc8e-725019313cd1" />
 
@@ -57,10 +49,6 @@ Developed with ❤️ by Eric Warren
 
 
 ## Known Issues
-
-> [!CAUTION]
-> Changing voices or selecting multiple voices in an instrument sometimes produces wrong results or crashes MuseScore. I'll investigate more once MuseScore 4.7 is released.  For now, I recommend leaving all presets on the default Voice 1.
-
 View known issues on [GitHub](https://github.com/eakwarren/Orchestrator/issues)
 
 
@@ -79,6 +67,10 @@ MuseScore Studio developers, wherever they may roam.
 
 
 ## Release Notes
+v1.0 7/15/26
+- Initial release
+
+
 v0.2.9 5/6/26
 - open / save preset collections
 - auto-refresh instrument lists
