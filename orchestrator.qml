@@ -29,13 +29,13 @@ MuseScore {
     description: qsTr("Preset system to quickly orchestrate sketches in MuseScore")
     categoryCode: "composing-arranging-tools"
     thumbnailName: "orchestrator.png"
-    version: "0.2.10"
+    version: "1.0"
 
     //--------------------------------------------------------------------------------
     // Log Engine
     //--------------------------------------------------------------------------------
 
-    property string logLevel: "debug" // "normal" | "verbose" | "debug"
+    property string logLevel: "normal" // "normal" | "verbose" | "debug"
     property string tag: root.title.toUpperCase()
 
     function __canLog(level) {
