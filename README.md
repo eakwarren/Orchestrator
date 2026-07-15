@@ -31,7 +31,9 @@ https://github.com/user-attachments/assets/419d59cd-750a-4cd0-93bd-b69cb6eb9e18
 
    Use the Filter to search for a preset or instrument. Use @color (red, orange, yellow, green, blue, purple or magenta) to filter by preset color, or @n (1-8) to filter by number of chord notes shown on the top right of a preset. For example, violoncellos @orange @3.
 
-   Open or Save preset collections with the folder button. Select different views with the display button.
+   Open or Save preset collections with the folder button. The Presets folder contains over 325 presets including melody, section, and larger orchestral combinations.
+
+   Select different views with the display button. With so many presets available, these other views combined with filtering are helpful to quickly find a preset.
 
    <img width="300" height="514" alt="plugin_window" src="https://github.com/user-attachments/assets/d8ce62f2-725d-4bfe-bc8e-725019313cd1" />
 
@@ -62,6 +64,8 @@ If you have a suggestion, or find a bug, please report it on [GitHub](https://gi
 _“If I have seen further, it is by standing on the shoulders of Giants.” ~Isaac Newton_
 
 MuseScore Studio developers, wherever they may roam.
+
+Divisimate developers for their [free templates](https://divisimate.com/templates/synchron-prime-2-0).
 
 
 
