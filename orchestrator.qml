@@ -4270,10 +4270,10 @@ MuseScore {
                         id: cardView
                         icon: {
                             switch (root.cardViewMode) {
-                            case 0: return IconCode.LIST
-                            case 1: return IconCode.GRID
-                            case 2: return IconCode.TOOLBAR_GRIP
-                            default: return IconCode.SPLIT_VIEW_VERTICAL
+                            case 0: return IconCode.SPLIT_VIEW_VERTICAL
+                            case 1: return IconCode.LIST
+                            case 2: return IconCode.GRID
+                            case 3: return IconCode.TOOLBAR_GRIP
                             }
                         }
                         toolTipTitle: qsTr("Cycle preset view")
