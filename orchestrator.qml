@@ -3716,7 +3716,7 @@ MuseScore {
             } else {
                 Interactive.info(
                             qsTr("No matching source notes."),
-                            qsTr("The selected source material does not contain notes for the requested preset rows."),
+                            qsTr("The selected source material does not contain notes for the requested preset rows. If the selection is the last measure in the score, add another measure and try again."),
                             [qsTr("Ok")]
                             )
             }
